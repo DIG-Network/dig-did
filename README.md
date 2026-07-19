@@ -126,16 +126,19 @@ owner key unless noted.
 | `hydrate_did_from_parent_spend` | Reconstruct the spendable child `Did` created by a parent DID's coin spend (fail-closed). | — |
 | `parse_did_coin_spend` | Parse a DID coin's own spend into the `Did` it spent + its p2 `Spend` (or `None` if not a DID). | — |
 | `did_info_from_puzzle` | Parse just a puzzle reveal into its `DidInfo`, without a coin or lineage proof. | — |
-| `resolve` | Project a DID's current state / DID document. | — |
+| `resolve_xch_address` / `resolve_xch_address_from_did_string` | Resolve a DID's CURRENT owner XCH payment `Address` from chain (over a `ChainSource`), authenticating the genuine launcher via the parent-spend walk before returning it — money-critical, fail-closed; `None` if unlaunched/melted. | — (chain read) |
 | `prove_lineage` | Prove a coin is rooted in a DID's identity (`Direct` or `LaunchedFrom`), over a `ChainSource` — returns an unforgeable `AncestryProof`; fail-closed. | — (pure verify) |
 | `walk_did_lineage_to_tip` | Walk a DID singleton to its current unspent tip (`DidTip { coin, info, proof }`), or `None` if unlaunched/melted. | — |
 | `did_string_from_launcher_id` / `launcher_id_from_did_string` | Encode/decode the canonical `did:chia:1…` string (bech32m, byte-agrees with `chia-sdk-utils`). | — |
 
-**Status:** `0.3` adds the **lineage-proof spine** — the `ChainSource` seam, `prove_lineage` +
-`AncestryProof`, and `walk_did_lineage_to_tip` ([`SPEC.md`](./SPEC.md) §5.1/§10) — on top of `0.2`
-(creation + hydration + `did:chia:` codec) and the `0.1` foundation (type surface, error taxonomy,
-signing boundary). The remaining operation modules above are declared and specified; each lands in its
-own release against this foundation. The table documents the complete designed interface.
+**Status:** `0.4` adds the **DID→XCH address resolver** (`resolve_xch_address` +
+`resolve_xch_address_from_did_string`, [`SPEC.md`](./SPEC.md) §3/§6) and migrates the `ChainSource`
+seam onto the canonical **`dig-chainsource-interface`** crate (the one non-drifting trait, re-exported
+so the public paths are unchanged). `0.3` added the **lineage-proof spine** — the `ChainSource` seam,
+`prove_lineage` + `AncestryProof`, and `walk_did_lineage_to_tip` ([`SPEC.md`](./SPEC.md) §5.1/§10) — on
+top of `0.2` (creation + hydration + `did:chia:` codec) and the `0.1` foundation (type surface, error
+taxonomy, signing boundary). The remaining operation modules above are declared and specified; each
+lands in its own release against this foundation. The table documents the complete designed interface.
 
 ---
 
@@ -147,9 +150,13 @@ own release against this foundation. The table documents the complete designed i
 - `DidError` / `DidResult<T>` — the error taxonomy ([`SPEC.md`](./SPEC.md) §6).
 - `AggSigConstants`, `RequiredSignature` — re-exported so you can call and consume
   `required_signatures` without a direct chia-wallet-sdk dependency.
-- `ChainSource` — the caller-supplied honest chain reader (no default impl; see [`SPEC.md`](./SPEC.md) §10).
+- `ChainSource` / `SingletonLineage` — re-exported from the canonical `dig-chainsource-interface` crate:
+  the caller-supplied honest chain reader (see [`SPEC.md`](./SPEC.md) §10) + a singleton's lineage
+  (membership + tip).
+- `Address` — re-exported bech32m address codec (`chia-sdk-utils`), for rendering/decoding a resolved
+  XCH payment address.
 - `AncestryProof` / `LineageModel` — the unforgeable output of `prove_lineage` (`Direct` | `LaunchedFrom`).
-- `SingletonLineage` / `DidTip` — a DID singleton's lineage (membership + tip) and its reconstructed tip.
+- `DidTip` — a DID singleton's reconstructed current tip.
 - `Coin`, `CoinSpend`, `Bytes32`, `Proof`, `LineageProof` — re-exported Chia wire types.
 
 ---
@@ -163,7 +170,7 @@ own release against this foundation. The table documents the complete designed i
 | `sign` | `required_signatures` — the signing boundary. |
 | `create` / `update` / `recovery` / `transfer` / `launch` / `melt` / `attest` | The DID operations. |
 | `hydrate` / `resolve` | Reconstruction + projection from chain data. |
-| `resolve` (lineage) | `ChainSource` seam, `SingletonLineage`, `DidTip`, the singleton-authentication walk, `walk_did_lineage_to_tip`, `MAX_LINEAGE_DEPTH`. |
+| `resolve` | `ChainSource`/`SingletonLineage` re-export, `DidTip`, the singleton-authentication walk, `walk_did_lineage_to_tip`, `resolve_xch_address`(`_from_did_string`), `MAX_LINEAGE_DEPTH`. |
 | `lineage` | `prove_lineage`, `AncestryProof`, `LineageModel`. |
 | `did_string` | The `did:chia:1…` codec. |
 

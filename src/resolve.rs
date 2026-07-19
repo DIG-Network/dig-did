@@ -300,8 +300,9 @@ pub fn walk_did_lineage_to_tip<S: ChainSource>(
 /// This primitive routes payments, so a wrong answer silently pays the wrong recipient. The tip's
 /// curried `launcher_id` is attacker-chosen (the `pay_to_coin_wearing_a_singleton_puzzle_hash`
 /// attack class), so `tip.info.launcher_id() == launcher_id` is INSUFFICIENT. After walking to the
-/// tip this function runs [`authenticate_singleton`] — which walks the parent-spend chain to the
-/// GENUINE launcher — and requires that authenticated launcher to equal `launcher_id`. Only then is
+/// tip this function runs the `authenticate_singleton` parent-spend walk — which walks the
+/// parent-spend chain to the GENUINE launcher — and requires that authenticated launcher to equal
+/// `launcher_id`. Only then is
 /// the address built. A dishonest [`ChainSource`] that echoes a DIFFERENT DID's tip for `launcher_id`
 /// is caught here as [`DidError::LauncherMismatch`], never resolved to the attacker's address.
 ///
