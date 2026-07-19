@@ -108,7 +108,7 @@ caller's inner spend requires.
 | **Melt** | U7 | `Did`, owner | DID spend with no odd-amount successor (terminal) | `None` | 1× `AGG_SIG_ME` (owner) |
 | **Announce-as-DID** (attest) | U8 | `Did`, owner, announcement message/target | DID update spend emitting the announcement condition | `Did` (unchanged) | 1× `AGG_SIG_ME` (owner) |
 | **Hydrate** | U9 | parent coin, parent puzzle reveal, parent solution, child coin | — (parse only) | the spendable `Did` | — |
-| **Resolve** | U10 | `Did` (or hydrated state) | — (projection only) | resolved view / DID document | — |
+| **Resolve-XCH-address** | U10 | `launcher_id` (or `did:chia:` string), address `prefix`, `ChainSource` | — (chain READ only) | the owner's payment `Address` (or `None` if unlaunched/melted) | — |
 
 Notes:
 - **Create** builds the eve DID via `Launcher::create_eve_did`, then performs the settle spend
@@ -222,6 +222,7 @@ not parse as a DID.
 | `NoIdentitySingleton` | The DID has no current on-chain coin — unlaunched or melted (§5.1, fail-closed). |
 | `NotASingleton` | A coin under `prove_lineage` is not a genuine singleton (a payment/change coin, or a pay-to coin wearing a singleton puzzle hash with no genuine recreation parent spend) (§5.1). |
 | `NotDidRooted` | A coin authenticates as a singleton but is neither the DID nor launched from a coin in the DID's lineage (§5.1). |
+| `LauncherMismatch` | `resolve_xch_address`'s tip authenticated as a genuine singleton, but its GENUINE launcher (walked from the parent-spend chain) is not the requested launcher — a dishonest source echoing another DID's tip. Fails closed rather than routing a payment to the wrong recipient (§3, §5.1). |
 | `LineageTooDeep` | The singleton parent-spend walk exceeded `MAX_LINEAGE_DEPTH` — a DoS guard (§5.1/§10). |
 
 Error messages MUST be descriptive and MUST NOT include secret material.
@@ -297,19 +298,32 @@ An implementation conforms to this spec when:
 
 dig-did performs **no network or chain I/O** (INV-1), yet lineage authentication needs to *read* chain
 state. `ChainSource` is the seam that reconciles the two — the caller supplies an honest reader; dig-did
-supplies all the trust logic. There is **no default impl** in dig-did: the consumer implements it over
-its own backend (coinset.org, a local full node, `chia-query`), keeping dig-did no-network and
-wasm-buildable.
+supplies all the trust logic. The trait is the **ONE canonical `dig-chainsource-interface` contract**
+(published to crates.io) — dig-did consumes and re-exports it (so `dig_did::ChainSource` and
+`dig_did::SingletonLineage` remain stable), never a per-crate copy that could byte-drift. There is **no
+default impl** in dig-did: the consumer implements it over its own backend (coinset.org, a local full
+node, `chia-query`), keeping dig-did no-network and wasm-buildable.
 
 ```rust
+// re-exported from dig-chainsource-interface
 pub trait ChainSource {
     type Error: core::fmt::Display;
+    fn coin_record(&self, coin_id: Bytes32) -> Result<Option<CoinRecord>, Self::Error>;
+    fn coin_records_by_puzzle_hash(&self, puzzle_hash: Bytes32, include_spent: bool)
+        -> Result<Vec<CoinRecord>, Self::Error>;
+    fn coin_records_by_parent(&self, parent_coin_id: Bytes32)
+        -> Result<Vec<CoinRecord>, Self::Error>;
+    fn coin_spend(&self, coin_id: Bytes32) -> Result<Option<CoinSpend>, Self::Error>;
+    fn parent_spend(&self, coin_id: Bytes32) -> Result<Option<CoinSpend>, Self::Error>; // default: coin_record + coin_spend
     fn resolve_singleton_lineage(&self, launcher_id: Bytes32)
         -> Result<Option<SingletonLineage>, Self::Error>;
-    fn parent_spend(&self, coin_id: Bytes32)
-        -> Result<Option<CoinSpend>, Self::Error>;
+    fn peak_height(&self) -> Result<Option<u32>, Self::Error>;
+    fn block_timestamp(&self, height: u32) -> Result<Option<u64>, Self::Error>;
 }
 ```
+
+The two methods dig-did's lineage + resolve logic consume are `resolve_singleton_lineage` and
+`parent_spend`:
 
 - `resolve_singleton_lineage` MUST be a genuine forward walk from the DID launcher to its current
   unspent tip, returning every coin id on the walk as a `SingletonLineage` (membership set + tip), or
@@ -325,6 +339,6 @@ against a source that fabricates the chain itself. Given honest chain data, dig-
 can launder itself into a DID's authority (§5.1, §7). Every read failure or gap fails closed
 (`DidError::Chain` / the §5.1 errors), never an "assume owned" default.
 
-**Coherence.** `SingletonLineage` (tip + membership `contains`) is byte-coherent with dig-identity's
-type of the same name, so dig-identity can later de-duplicate onto dig-did (the lower foundation) without
-a behavioural change.
+**Coherence.** `SingletonLineage` (tip + membership `contains`) is the `dig-chainsource-interface` type
+itself, re-exported — so every ecosystem consumer (dig-did, dig-identity, chia-query) shares ONE shape
+that cannot byte-drift.

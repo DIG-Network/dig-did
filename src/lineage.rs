@@ -157,6 +157,7 @@ mod tests {
     use chia_wallet_sdk::driver::{Launcher, SpendContext, StandardLayer};
     use chia_wallet_sdk::test::Simulator;
     use chia_wallet_sdk::types::Conditions;
+    use dig_chainsource_interface::CoinRecord;
 
     use crate::create::create_simple_did;
     use crate::resolve::{authenticate_singleton_bounded, SingletonLineage};
@@ -172,6 +173,40 @@ mod tests {
     impl ChainSource for SimSource<'_> {
         type Error = String;
 
+        fn coin_record(&self, coin_id: Bytes32) -> Result<Option<CoinRecord>, Self::Error> {
+            Ok(self.sim.coin_state(coin_id).map(CoinRecord::from))
+        }
+
+        fn coin_records_by_puzzle_hash(
+            &self,
+            _puzzle_hash: Bytes32,
+            _include_spent: bool,
+        ) -> Result<Vec<CoinRecord>, Self::Error> {
+            // dig-did's lineage logic never queries by puzzle hash; the honest simulator source only
+            // needs the parent-walk + lineage reads below.
+            Ok(Vec::new())
+        }
+
+        fn coin_records_by_parent(
+            &self,
+            _parent_coin_id: Bytes32,
+        ) -> Result<Vec<CoinRecord>, Self::Error> {
+            Ok(Vec::new())
+        }
+
+        fn coin_spend(&self, coin_id: Bytes32) -> Result<Option<CoinSpend>, Self::Error> {
+            // The spend that SPENT `coin_id` — the simulator holds its reveal + solution once spent.
+            let Some(state) = self.sim.coin_state(coin_id) else {
+                return Ok(None);
+            };
+            let (Some(reveal), Some(solution)) =
+                (self.sim.puzzle_reveal(coin_id), self.sim.solution(coin_id))
+            else {
+                return Ok(None);
+            };
+            Ok(Some(CoinSpend::new(state.coin, reveal, solution)))
+        }
+
         fn resolve_singleton_lineage(
             &self,
             launcher_id: Bytes32,
@@ -179,21 +214,12 @@ mod tests {
             Ok(self.lineages.get(&launcher_id).cloned())
         }
 
-        fn parent_spend(&self, coin_id: Bytes32) -> Result<Option<CoinSpend>, Self::Error> {
-            let Some(state) = self.sim.coin_state(coin_id) else {
-                return Ok(None);
-            };
-            let parent_id = state.coin.parent_coin_info;
-            let Some(parent) = self.sim.coin_state(parent_id) else {
-                return Ok(None);
-            };
-            let (Some(reveal), Some(solution)) = (
-                self.sim.puzzle_reveal(parent_id),
-                self.sim.solution(parent_id),
-            ) else {
-                return Ok(None);
-            };
-            Ok(Some(CoinSpend::new(parent.coin, reveal, solution)))
+        fn peak_height(&self) -> Result<Option<u32>, Self::Error> {
+            Ok(None)
+        }
+
+        fn block_timestamp(&self, _height: u32) -> Result<Option<u64>, Self::Error> {
+            Ok(None)
         }
     }
 

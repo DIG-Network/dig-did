@@ -35,7 +35,10 @@
 //! **hydrate** ([`hydrate_did_from_parent_spend`], [`parse_did_coin_spend`],
 //! [`did_info_from_puzzle`]), the **did:chia:** string codec ([`did_string_from_launcher_id`],
 //! [`launcher_id_from_did_string`]), and the **lineage-proof spine** — the [`resolve::ChainSource`]
-//! chain-reading seam, [`prove_lineage`] + [`AncestryProof`], and [`walk_did_lineage_to_tip`]. The
+//! chain-reading seam (the ONE canonical `dig-chainsource-interface` trait, re-exported),
+//! [`prove_lineage`] + [`AncestryProof`], and [`walk_did_lineage_to_tip`] — and the **DID→XCH address
+//! resolver** ([`resolve_xch_address`], [`resolve_xch_address_from_did_string`]), which authenticates
+//! a DID's current tip to its genuine launcher before returning the owner's payment [`Address`]. The
 //! remaining DID operations (update, recovery, transfer, launch, melt, attest, resolve-document) land
 //! in their own units against this foundation; their modules are declared below as doc-only stubs so
 //! the layout is final.
@@ -73,10 +76,15 @@ pub use error::{DidError, DidResult};
 pub use hydrate::{did_info_from_puzzle, hydrate_did_from_parent_spend, parse_did_coin_spend};
 pub use lineage::{prove_lineage, AncestryProof, LineageModel};
 pub use resolve::{
-    walk_did_lineage_to_tip, ChainSource, DidTip, SingletonLineage, MAX_LINEAGE_DEPTH,
+    resolve_xch_address, resolve_xch_address_from_did_string, walk_did_lineage_to_tip, ChainSource,
+    DidTip, SingletonLineage, MAX_LINEAGE_DEPTH,
 };
 pub use sign::required_signatures;
 pub use types::{Bytes32, Coin, CoinSpend, Did, DidInfo, DidSpend, LineageProof, Owner, Proof};
+
+// The canonical bech32m address codec — re-exported so a consumer can render / decode a resolved XCH
+// payment address (from [`resolve_xch_address`]) without a direct `chia-sdk-utils` dependency.
+pub use chia_sdk_utils::Address;
 
 // Re-export the signing types a consumer needs to CALL [`required_signatures`] and consume its
 // result, so a downstream crate need not add a direct chia-wallet-sdk dependency for them.

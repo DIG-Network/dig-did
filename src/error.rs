@@ -79,6 +79,15 @@ pub enum DidError {
     #[error("coin is not rooted in the DID's singleton lineage")]
     NotDidRooted,
 
+    /// The DID's current tip authenticated as a genuine singleton, but its GENUINE launcher (walked
+    /// from the parent-spend chain) is not the launcher that was requested. This is the money-critical
+    /// guard for [`crate::resolve_xch_address`]: a dishonest [`crate::ChainSource`] can echo an
+    /// attacker DID's tip for a victim launcher, and the curried `launcher_id` on that tip is
+    /// attacker-chosen, so only the parent-walk-authenticated launcher may be trusted. Resolving an
+    /// address from a mismatched launcher would pay the wrong recipient, so this fails closed (SPEC §5).
+    #[error("the DID tip's authenticated launcher does not match the requested launcher")]
+    LauncherMismatch,
+
     /// The parent-spend walk exceeded [`crate::resolve::MAX_LINEAGE_DEPTH`] — a DoS guard against an
     /// unbounded (possibly adversarial) lineage. The proof fails closed rather than walk forever.
     #[error("singleton lineage exceeds the maximum authenticated depth")]
