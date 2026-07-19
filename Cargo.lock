@@ -804,6 +804,7 @@ dependencies = [
  "chia-protocol",
  "chia-puzzle-types",
  "chia-sdk-test",
+ "chia-sdk-utils",
  "chia-wallet-sdk",
  "clvm-traits",
  "clvm-utils",

@@ -57,7 +57,10 @@ pub mod transfer;
 pub mod update;
 
 // The curated public surface — consumers depend on these paths, not the module layout.
+pub use create::{create_did, create_eve_did_only, create_simple_did};
+pub use did_string::{did_string_from_launcher_id, launcher_id_from_did_string, DID_CHIA_PREFIX};
 pub use error::{DidError, DidResult};
+pub use hydrate::{did_info_from_puzzle, hydrate_did_from_parent_spend, parse_did_coin_spend};
 pub use sign::required_signatures;
 pub use types::{Bytes32, Coin, CoinSpend, Did, DidInfo, DidSpend, LineageProof, Owner, Proof};
 
