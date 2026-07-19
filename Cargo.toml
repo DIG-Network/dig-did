@@ -53,3 +53,11 @@ thiserror = "2"
 chia-sdk-test = "0.30"
 # Hex assertions on computed signature messages / coin ids in tests.
 hex = "0.4"
+# Ergonomic `Result<_, anyhow::Error>` test bodies (the SDK's own test suite uses the same idiom).
+anyhow = "1"
+# `Streamable::to_bytes` — serializes a `CoinSpend` to its canonical wire bytes for the golden-fixture
+# test (SPEC §8).
+chia-traits = "0.26"
+# `SecretKey::from_seed` — a deterministic (never hard-coded-literal) BLS keypair for the golden
+# fixture and other tests that need a stable key across runs.
+chia-bls = "0.26"

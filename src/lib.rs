@@ -30,10 +30,13 @@
 //!
 //! ## Status
 //!
-//! This is the U1 foundation: the type surface, the error taxonomy, the inner-spend helpers, and
-//! the signing boundary. The DID operations (create, update, recovery, transfer, launch, melt,
-//! attest, hydrate, resolve, did:chia codec) land in their own units against this foundation; their
-//! modules are declared below as doc-only stubs so the layout is final.
+//! The foundation (type surface, error taxonomy, inner-spend helpers, signing boundary) ships
+//! alongside **create** ([`create_did`], [`create_simple_did`], [`create_eve_did_only`]),
+//! **hydrate** ([`hydrate_did_from_parent_spend`], [`parse_did_coin_spend`],
+//! [`did_info_from_puzzle`]), and the **did:chia:** string codec ([`did_string_from_launcher_id`],
+//! [`launcher_id_from_did_string`]). The remaining DID operations (update, recovery, transfer,
+//! launch, melt, attest, resolve) land in their own units against this foundation; their modules are
+//! declared below as doc-only stubs so the layout is final.
 
 // Internal helpers — not part of the public surface.
 mod context;
@@ -43,12 +46,14 @@ pub mod error;
 pub mod sign;
 pub mod types;
 
-// DID operation modules — declared now so the crate layout is final; each is filled in its own unit
-// (doc-only until then, so they add no untested surface).
-pub mod attest;
+// DID creation, hydration, and the did:chia string codec — shipped.
 pub mod create;
 pub mod did_string;
 pub mod hydrate;
+
+// The remaining DID operation modules — declared now so the crate layout is final; each is filled
+// in its own unit (doc-only until then, so they add no untested surface).
+pub mod attest;
 pub mod launch;
 pub mod melt;
 pub mod recovery;

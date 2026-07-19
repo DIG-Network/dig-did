@@ -64,8 +64,7 @@ mod tests {
         let did = did_string_from_launcher_id(launcher_id);
         assert!(did.starts_with(DID_CHIA_PREFIX));
 
-        let decoded =
-            launcher_id_from_did_string(&did).expect("a freshly-encoded DID must decode");
+        let decoded = launcher_id_from_did_string(&did).expect("a freshly-encoded DID must decode");
         assert_eq!(decoded, launcher_id);
     }
 
