@@ -29,13 +29,22 @@ use crate::types::{DidSpend, Owner};
 ///
 /// # Signature
 ///
-/// Exactly one `AGG_SIG_ME` is required, over the funding-coin spend, under whichever key/spend
-/// `owner` names (SPEC §3).
+/// Two `AGG_SIG_ME` signatures are required, both under whichever key/spend `owner` names
+/// (SPEC §3): one over the funding-coin spend (which creates the launcher) and one over the settle
+/// spend (which confirms the DID for wallets). Both are coin-bound `AGG_SIG_ME`, never `AGG_SIG_UNSAFE`.
 ///
 /// # Errors
 ///
 /// Propagates any chia-wallet-sdk driver failure (currying, spend construction) as
 /// [`crate::DidError::Driver`].
+///
+/// # Owner::Custom
+///
+/// When using `Owner::Custom(spend)`, the ONE caller-supplied inner spend is used for BOTH the
+/// funding-coin spend and the settle spend. The caller is responsible for ensuring the custom spend
+/// emits all conditions needed to satisfy both steps; conditions are not added by dig-did for a
+/// custom spend. A custom create-spend that omits required conditions will fail closed with a parse
+/// error, never a custody leak.
 pub fn create_did(
     ctx: &mut SpendContext,
     funding_coin: Coin,
