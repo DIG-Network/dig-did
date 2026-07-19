@@ -33,10 +33,12 @@
 //! The foundation (type surface, error taxonomy, inner-spend helpers, signing boundary) ships
 //! alongside **create** ([`create_did`], [`create_simple_did`], [`create_eve_did_only`]),
 //! **hydrate** ([`hydrate_did_from_parent_spend`], [`parse_did_coin_spend`],
-//! [`did_info_from_puzzle`]), and the **did:chia:** string codec ([`did_string_from_launcher_id`],
-//! [`launcher_id_from_did_string`]). The remaining DID operations (update, recovery, transfer,
-//! launch, melt, attest, resolve) land in their own units against this foundation; their modules are
-//! declared below as doc-only stubs so the layout is final.
+//! [`did_info_from_puzzle`]), the **did:chia:** string codec ([`did_string_from_launcher_id`],
+//! [`launcher_id_from_did_string`]), and the **lineage-proof spine** — the [`resolve::ChainSource`]
+//! chain-reading seam, [`prove_lineage`] + [`AncestryProof`], and [`walk_did_lineage_to_tip`]. The
+//! remaining DID operations (update, recovery, transfer, launch, melt, attest, resolve-document) land
+//! in their own units against this foundation; their modules are declared below as doc-only stubs so
+//! the layout is final.
 
 // Internal helpers — not part of the public surface.
 mod context;
@@ -57,15 +59,22 @@ pub mod attest;
 pub mod launch;
 pub mod melt;
 pub mod recovery;
-pub mod resolve;
 pub mod transfer;
 pub mod update;
+
+// Lineage authentication (U3): the chain-reading seam + singleton walk, and the lineage proof.
+pub mod lineage;
+pub mod resolve;
 
 // The curated public surface — consumers depend on these paths, not the module layout.
 pub use create::{create_did, create_eve_did_only, create_simple_did};
 pub use did_string::{did_string_from_launcher_id, launcher_id_from_did_string, DID_CHIA_PREFIX};
 pub use error::{DidError, DidResult};
 pub use hydrate::{did_info_from_puzzle, hydrate_did_from_parent_spend, parse_did_coin_spend};
+pub use lineage::{prove_lineage, AncestryProof, LineageModel};
+pub use resolve::{
+    walk_did_lineage_to_tip, ChainSource, DidTip, SingletonLineage, MAX_LINEAGE_DEPTH,
+};
 pub use sign::required_signatures;
 pub use types::{Bytes32, Coin, CoinSpend, Did, DidInfo, DidSpend, LineageProof, Owner, Proof};
 

@@ -13,7 +13,7 @@
 # so the layout is final.
 [package]
 name = "dig-did"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75.0"
 license = "Apache-2.0 OR MIT"
@@ -42,6 +42,10 @@ clvm-traits = "0.26"
 # Needed directly for `tree_hash` on a caller-supplied custom inner puzzle (`Owner::Custom`) — the
 # umbrella crate does not re-export it.
 clvm-utils = "0.26"
+# The singleton launcher puzzle hash (`SINGLETON_LAUNCHER_HASH`) that terminates the lineage-proof
+# walk (SPEC §5) — the same const the SDK's `SingletonLayer` uses, so dig-did recognizes a launcher
+# coin byte-identically. Pinned to the version chia-wallet-sdk 0.30 resolves to.
+chia-puzzles = "0.20"
 # The canonical `did:chia:` bech32m codec (`Address`) — the same one dig-identity and chip35 use, so
 # a DID string byte-agrees ecosystem-wide (SPEC §2.3/§9). The umbrella crate does not re-export it.
 chia-sdk-utils = "0.30"
