@@ -58,9 +58,31 @@ pub enum DidError {
     MissingHint,
 
     /// A chain-level precondition was violated (e.g. a supplied coin does not match the expected
-    /// launcher). The string states the specific violation.
+    /// launcher). The string states the specific violation. Also carries a [`crate::resolve::ChainSource`]
+    /// read error verbatim — a failed read NEVER degrades to "assume owned" (SPEC §5, fail-closed).
     #[error("chain precondition failed: {0}")]
     Chain(String),
+
+    /// The DID's identity singleton has no current on-chain coin — it was never launched, or has been
+    /// melted, so there is no lineage to root a coin against (SPEC §5, fail-closed).
+    #[error("DID singleton has no current on-chain coin (unlaunched or melted)")]
+    NoIdentitySingleton,
+
+    /// The coin under proof could not be authenticated as a genuine singleton: its parent-spend chain
+    /// does not resolve to a singleton launcher (an ordinary payment/change coin, or a pay-to coin that
+    /// merely wears a singleton puzzle hash without a genuine recreation parent spend). SPEC §5.
+    #[error("coin is not a genuine singleton")]
+    NotASingleton,
+
+    /// The coin authenticates as a genuine singleton, but neither IS the DID singleton nor was launched
+    /// from a coin in the DID singleton's lineage — it is not rooted in the DID's identity (SPEC §5).
+    #[error("coin is not rooted in the DID's singleton lineage")]
+    NotDidRooted,
+
+    /// The parent-spend walk exceeded [`crate::resolve::MAX_LINEAGE_DEPTH`] — a DoS guard against an
+    /// unbounded (possibly adversarial) lineage. The proof fails closed rather than walk forever.
+    #[error("singleton lineage exceeds the maximum authenticated depth")]
+    LineageTooDeep,
 }
 
 #[cfg(test)]

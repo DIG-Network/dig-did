@@ -57,15 +57,22 @@ pub mod attest;
 pub mod launch;
 pub mod melt;
 pub mod recovery;
-pub mod resolve;
 pub mod transfer;
 pub mod update;
+
+// Lineage authentication (U3): the chain-reading seam + singleton walk, and the lineage proof.
+pub mod lineage;
+pub mod resolve;
 
 // The curated public surface — consumers depend on these paths, not the module layout.
 pub use create::{create_did, create_eve_did_only, create_simple_did};
 pub use did_string::{did_string_from_launcher_id, launcher_id_from_did_string, DID_CHIA_PREFIX};
 pub use error::{DidError, DidResult};
 pub use hydrate::{did_info_from_puzzle, hydrate_did_from_parent_spend, parse_did_coin_spend};
+pub use lineage::{prove_lineage, AncestryProof, LineageModel};
+pub use resolve::{
+    walk_did_lineage_to_tip, ChainSource, DidTip, SingletonLineage, MAX_LINEAGE_DEPTH,
+};
 pub use sign::required_signatures;
 pub use types::{Bytes32, Coin, CoinSpend, Did, DidInfo, DidSpend, LineageProof, Owner, Proof};
 
