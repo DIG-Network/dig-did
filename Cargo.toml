@@ -13,7 +13,7 @@
 # so the layout is final.
 [package]
 name = "dig-did"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75.0"
 license = "Apache-2.0 OR MIT"
@@ -39,6 +39,9 @@ chia-wallet-sdk = "0.30"
 chia-protocol = "0.26"
 chia-puzzle-types = "0.26"
 clvm-traits = "0.26"
+# Needed directly for `tree_hash` on a caller-supplied custom inner puzzle (`Owner::Custom`) — the
+# umbrella crate does not re-export it.
+clvm-utils = "0.26"
 # The crate error taxonomy (SPEC §6). thiserror 2 matches the sibling DIG crates.
 thiserror = "2"
 
