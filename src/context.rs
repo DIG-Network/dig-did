@@ -18,9 +18,8 @@ use crate::DidResult;
 /// - [`Owner::Custom`] returns the caller's pre-built inner spend unchanged. A custom p2 puzzle
 ///   bakes its own conditions in when the caller constructs it, so `conditions` is intentionally
 ///   ignored for this variant — the caller owns the inner spend end to end.
-// Consumed by the DID operation modules (U2+); exercised now by this module's own tests. The
-// `allow` keeps `-D warnings` green while the operation units are still doc-only stubs.
-#[allow(dead_code)]
+///
+/// Consumed by every DID operation module (create, hydrate follow-ups, and beyond).
 pub(crate) fn inner_spend(
     ctx: &mut SpendContext,
     owner: Owner,
@@ -38,8 +37,7 @@ pub(crate) fn inner_spend(
 /// Drains every coin spend accumulated in the [`SpendContext`] into a flat vector, in spend order.
 ///
 /// A thin wrapper over [`SpendContext::take`] that names the intent at the DID call sites.
-// Consumed by the DID operation modules (U2+); exercised now by this module's own tests.
-#[allow(dead_code)]
+/// Consumed by every DID operation module that returns a [`crate::DidSpend`].
 pub(crate) fn drain_coin_spends(ctx: &mut SpendContext) -> Vec<chia_protocol::CoinSpend> {
     ctx.take()
 }

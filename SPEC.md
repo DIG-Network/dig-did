@@ -68,7 +68,7 @@ use it rather than recomputing.
 solution to spend the coin. A `Did` carries everything needed to spend the DID EXCEPT the inner
 puzzle+solution, which the `Owner` (§2.4) supplies.
 
-### 2.3 `did:chia:1…` string (codec, unit U11)
+### 2.3 `did:chia:1…` string (codec)
 
 A DID's canonical string form is `did:chia:` followed by the **bech32m** encoding of its
 `launcher_id`, using the same address codec as `chia-sdk-utils` `Address` (hrp `did:chia:`). The
@@ -98,7 +98,7 @@ caller's inner spend requires.
 
 | Operation | Unit | Inputs | CoinSpends produced | Recreated child | Signature |
 |---|---|---|---|---|---|
-| **Create** | U2 | funding coin, owner, `recovery_list_hash`, `num_verifications_required`, metadata | launcher spend (from funding coin) + eve DID spend + owner update spend | the new `Did` | 1× `AGG_SIG_ME` (owner, over the funding-coin spend) |
+| **Create** | U2 | funding coin, owner, `recovery_list_hash`, `num_verifications_required`, metadata | launcher spend (from funding coin) + eve DID spend + owner settle spend | the new `Did` | 2× `AGG_SIG_ME` (owner: one over the funding-coin spend, one over the settle spend) |
 | **Update-metadata** | U3 | `Did`, owner, new metadata | DID update spend recreating the DID with new metadata | `Did` with new `metadata` | 1× `AGG_SIG_ME` (owner) |
 | **Settle** | U3 | `Did`, owner | DID update spend with unchanged metadata/p2 (confirms metadata for wallets) | `Did` unchanged in shape | 1× `AGG_SIG_ME` (owner) |
 | **Set-recovery** | U4 | `Did`, owner, new `recovery_list_hash`, `num_verifications_required` | DID update spend recreating the DID with new recovery config | `Did` with new recovery fields | 1× `AGG_SIG_ME` (owner) |
@@ -111,8 +111,14 @@ caller's inner spend requires.
 | **Resolve** | U10 | `Did` (or hydrated state) | — (projection only) | resolved view / DID document | — |
 
 Notes:
-- **Create** follows the SDK's `Launcher::create_did` shape: eve DID via `create_eve_did`, then an
-  `update` spend so the DID is wallet-parseable. All resulting spends are returned together.
+- **Create** builds the eve DID via `Launcher::create_eve_did`, then performs the settle spend
+  itself (via `Did::spend` with an `Owner`-derived inner [`Spend`], SPEC §2.4) rather than the SDK's
+  typed `Launcher::create_did`/`Did::update`, because those require a concrete `SpendWithConditions +
+  ToTreeHash` inner layer and so cannot accept an `Owner::Custom` pre-built spend. Building on the raw
+  `Did::spend` primitive keeps every create/update/settle operation generic over `Owner`. All three
+  resulting spends (funding, launcher, settle) are returned together as one `DidSpend`.
+  `create_eve_did_only` is the lower-level primitive that stops after the launcher spend, for a
+  caller that wants to fold its own follow-up spend into the same bundle.
 - **Update/Settle/Transfer/Launch/Melt/Attest** all build on the SDK `Did::update*` / `Did::spend` /
   `Did::transfer` methods with the inner spend from the `Owner` (§2.4).
 - dig-did MUST NOT sign or broadcast any of these; it returns the `CoinSpend`s only (INV-3).
@@ -144,7 +150,7 @@ with the SDK's signature-message construction (INV-4, §9).
 
 ## §5 Hydration & lineage (fail-closed)
 
-Reconstructing a spendable `Did` from chain data (unit U9) is **fail-closed**: dig-did returns an
+Reconstructing a spendable `Did` from chain data is **fail-closed**: dig-did returns an
 error rather than a degraded or guessed DID.
 
 - A DID child is parsed from its parent coin spend (SDK `Did::parse_child`), which relies on the
