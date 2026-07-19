@@ -33,10 +33,12 @@
 //! The foundation (type surface, error taxonomy, inner-spend helpers, signing boundary) ships
 //! alongside **create** ([`create_did`], [`create_simple_did`], [`create_eve_did_only`]),
 //! **hydrate** ([`hydrate_did_from_parent_spend`], [`parse_did_coin_spend`],
-//! [`did_info_from_puzzle`]), and the **did:chia:** string codec ([`did_string_from_launcher_id`],
-//! [`launcher_id_from_did_string`]). The remaining DID operations (update, recovery, transfer,
-//! launch, melt, attest, resolve) land in their own units against this foundation; their modules are
-//! declared below as doc-only stubs so the layout is final.
+//! [`did_info_from_puzzle`]), the **did:chia:** string codec ([`did_string_from_launcher_id`],
+//! [`launcher_id_from_did_string`]), and the **lineage-proof spine** — the [`resolve::ChainSource`]
+//! chain-reading seam, [`prove_lineage`] + [`AncestryProof`], and [`walk_did_lineage_to_tip`]. The
+//! remaining DID operations (update, recovery, transfer, launch, melt, attest, resolve-document) land
+//! in their own units against this foundation; their modules are declared below as doc-only stubs so
+//! the layout is final.
 
 // Internal helpers — not part of the public surface.
 mod context;

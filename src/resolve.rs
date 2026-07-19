@@ -159,6 +159,7 @@ impl DidTip {
 /// The authenticated result of the singleton walk: the launcher a coin genuinely descends from, plus
 /// the launcher coin itself (whose `parent_coin_info` is the coin that CREATED the launcher — the
 /// launch-from-DID link for [`LineageModel::LaunchedFrom`]).
+#[derive(Debug)]
 pub(crate) struct AuthenticatedLineage {
     /// The launcher id the walked coin provably descends from (the curry commitment == the launcher).
     pub(crate) launcher_id: Bytes32,
@@ -180,6 +181,16 @@ pub(crate) fn authenticate_singleton<S: ChainSource>(
     coin_id: Bytes32,
     source: &S,
 ) -> DidResult<AuthenticatedLineage> {
+    authenticate_singleton_bounded(coin_id, source, MAX_LINEAGE_DEPTH)
+}
+
+/// [`authenticate_singleton`] with an explicit depth bound — the DoS guard, factored out so the
+/// [`DidError::LineageTooDeep`] behaviour can be exercised over a real (short) chain with a tiny bound.
+pub(crate) fn authenticate_singleton_bounded<S: ChainSource>(
+    coin_id: Bytes32,
+    source: &S,
+    max_depth: usize,
+) -> DidResult<AuthenticatedLineage> {
     let mut allocator = Allocator::new();
     let mut trail = vec![coin_id];
     let mut current = coin_id;
@@ -187,7 +198,7 @@ pub(crate) fn authenticate_singleton<S: ChainSource>(
     // and re-checked at every subsequent hop and at the terminal launcher.
     let mut expected_launcher: Option<Bytes32> = None;
 
-    for _hop in 0..MAX_LINEAGE_DEPTH {
+    for _hop in 0..max_depth {
         let spend = source
             .parent_spend(current)
             .map_err(chain_error)?
@@ -251,8 +262,8 @@ fn singleton_successor(
         .map_err(DidError::Driver)?;
     let output = run_puzzle(allocator, layer.inner_puzzle.ptr(), solution.inner_solution)
         .map_err(|error| DidError::Parse(error.to_string()))?;
-    let conditions =
-        Vec::<Condition>::from_clvm(allocator, output).map_err(|e| DidError::Parse(e.to_string()))?;
+    let conditions = Vec::<Condition>::from_clvm(allocator, output)
+        .map_err(|e| DidError::Parse(e.to_string()))?;
 
     let Some(create_coin) = conditions
         .into_iter()
@@ -285,14 +296,19 @@ fn launcher_creates(
 ) -> DidResult<bool> {
     let output = run_puzzle(allocator, launcher_puzzle.ptr(), launcher_solution)
         .map_err(|error| DidError::Parse(error.to_string()))?;
-    let conditions =
-        Vec::<Condition>::from_clvm(allocator, output).map_err(|e| DidError::Parse(e.to_string()))?;
+    let conditions = Vec::<Condition>::from_clvm(allocator, output)
+        .map_err(|e| DidError::Parse(e.to_string()))?;
 
     Ok(conditions
         .into_iter()
         .filter_map(Condition::into_create_coin)
         .any(|create_coin| {
-            Coin::new(launcher.coin_id(), create_coin.puzzle_hash, create_coin.amount).coin_id()
+            Coin::new(
+                launcher.coin_id(),
+                create_coin.puzzle_hash,
+                create_coin.amount,
+            )
+            .coin_id()
                 == eve_id
         }))
 }
@@ -333,9 +349,15 @@ pub fn walk_did_lineage_to_tip<S: ChainSource>(
         .filter(|coin| coin.coin_id() == tip_id)
         .ok_or(DidError::NotDid)?;
 
-    let did = Did::parse_child(&mut allocator, parent, parent_puzzle, parent_solution, tip_coin)
-        .map_err(DidError::Driver)?
-        .ok_or(DidError::NotDid)?;
+    let did = Did::parse_child(
+        &mut allocator,
+        parent,
+        parent_puzzle,
+        parent_solution,
+        tip_coin,
+    )
+    .map_err(DidError::Driver)?
+    .ok_or(DidError::NotDid)?;
 
     Ok(Some(DidTip {
         coin: did.coin,

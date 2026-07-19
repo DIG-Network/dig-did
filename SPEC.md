@@ -164,6 +164,44 @@ error rather than a degraded or guessed DID.
 - Hydration MUST NOT fabricate a lineage proof or a hint. A DID that cannot be proven spendable is an
   error, never a partially-populated success.
 
+### 5.1 Lineage proof (`prove_lineage` → `AncestryProof`)
+
+`prove_lineage(coin_id, did, chain)` answers one question — *is `coin_id` a coin the DID identity owns
+/ is rooted in?* — over a caller-supplied `ChainSource` (§10). It returns an unforgeable `AncestryProof`
+(private fields, accessor-only) via **exactly two accepted models**, both reduced to DID-singleton
+**lineage membership**:
+
+- **`Direct`** — `coin_id` authenticates as a state of the DID singleton itself: its authenticated
+  launcher id equals `did.launcher_id`.
+- **`LaunchedFrom { launcher, did_parent }`** — `coin_id` is a *distinct* singleton whose launcher
+  coin's `parent_coin_info` (`did_parent`) is a **member** of the DID singleton's lineage. Membership,
+  NOT tip-equality: launching from a DID recreates the DID coin in the same spend, so the launcher's
+  parent is a past DID coin `Cn` while the tip is already `Cn+1`.
+
+**The curry-commitment authentication rule (the soundness crux).** A coin is authenticated as a genuine
+singleton ONLY by walking its parent-spend chain (`ChainSource::parent_spend`): at each hop the parent
+puzzle MUST parse as the SDK `SingletonLayer` (proving the parent is itself a singleton and yielding its
+*curried* `launcher_id`); the parent's inner puzzle is run and its odd-amount successor re-wrapped in the
+singleton curry (`SingletonArgs::curry_tree_hash(launcher_id, inner)`), and that computed successor MUST
+equal the child under authentication. The walk terminates at the singleton **launcher** coin
+(`SINGLETON_LAUNCHER_HASH`), yielding the authenticated `launcher_id`. dig-did MUST NEVER authenticate a
+coin on `coin.puzzle_hash == singleton_puzzle_hash(...)` alone (a pay-to coin can wear any puzzle hash),
+nor on a bare `parent_coin_info` field without the parent's spend proving the recreation.
+
+**Out of scope — MUST fail.** An ordinary payment/change coin whose `parent_coin_info` merely happens to
+be a DID coin is REJECTED (`NotASingleton`): a DID spend may pay anyone, so a non-singleton output is not
+owned by the DID. The discriminator is singleton structure.
+
+**Fail-closed.** Every gap/mismatch is an error, never a soft `true`: no DID lineage →
+`NoIdentitySingleton`; not a genuine singleton → `NotASingleton`; a genuine singleton neither the DID nor
+launched from it → `NotDidRooted`; a walk past `MAX_LINEAGE_DEPTH` → `LineageTooDeep`; a `ChainSource`
+read failure → `Chain` (never "assume owned").
+
+`walk_did_lineage_to_tip(chain, launcher_id)` is the forward companion: it resolves the DID singleton's
+current unspent tip and reconstructs it as a `DidTip { coin, info, proof }` (SDK `Did::parse_child`), or
+`None` when the DID is unlaunched/melted. It fails closed (`NotDid`) when the tip's creating spend does
+not parse as a DID.
+
 ---
 
 ## §6 Error taxonomy
@@ -180,7 +218,11 @@ error rather than a degraded or guessed DID.
 | `InvalidRecovery(String)` | An inconsistent recovery configuration was supplied. |
 | `MissingLineage` | Hydration could not establish the lineage proof (fail-closed, §5). |
 | `MissingHint` | A parsed DID coin was missing the owner hint memo (fail-closed, §5). |
-| `Chain(String)` | A chain-level precondition was violated (e.g. a coin does not match the expected launcher). |
+| `Chain(String)` | A chain-level precondition was violated, or a `ChainSource` read failed (§10) — surfaced verbatim, never degraded to "assume owned". |
+| `NoIdentitySingleton` | The DID has no current on-chain coin — unlaunched or melted (§5.1, fail-closed). |
+| `NotASingleton` | A coin under `prove_lineage` is not a genuine singleton (a payment/change coin, or a pay-to coin wearing a singleton puzzle hash with no genuine recreation parent spend) (§5.1). |
+| `NotDidRooted` | A coin authenticates as a singleton but is neither the DID nor launched from a coin in the DID's lineage (§5.1). |
+| `LineageTooDeep` | The singleton parent-spend walk exceeded `MAX_LINEAGE_DEPTH` — a DoS guard (§5.1/§10). |
 
 Error messages MUST be descriptive and MUST NOT include secret material.
 
@@ -200,6 +242,15 @@ Error messages MUST be descriptive and MUST NOT include secret material.
   so a caller never signs against a mis-reconstructed DID.
 - **Deterministic byte output.** Given identical inputs, dig-did produces identical `CoinSpend`
   bytes (INV-4 delegation to the SDK), making spends auditable and reproducible.
+- **Unforgeable lineage proof.** An `AncestryProof` has private fields and accessor-only reads — it
+  cannot be minted by a struct literal; the only constructor, `prove_lineage`, authenticates every
+  field against the chain (§5.1). A value of the type is therefore evidence the proof genuinely holds.
+- **Sound singleton authentication.** A coin is proven owned ONLY by the curry-commitment walk (§5.1) —
+  never by puzzle-hash equality or a bare `parent_coin_info`. A non-singleton coin (a payment routed
+  through a DID spend) fails closed as `NotASingleton`, so a DID spend that pays an attacker never
+  launders that coin into the DID's authority.
+- **Bounded work.** The parent-spend walk is capped at `MAX_LINEAGE_DEPTH`, so a malicious
+  `ChainSource` cannot force unbounded computation (`LineageTooDeep`).
 
 ---
 
@@ -237,3 +288,43 @@ An implementation conforms to this spec when:
   indistinguishable on chain.
 - All fail-closed hydration rules (§5) hold: missing lineage/hint/DID-shape are errors, never
   degraded successes.
+- `prove_lineage` accepts exactly the two models of §5.1 and rejects everything else with the stated
+  fail-closed error; the curry-commitment authentication rule holds (no puzzle-hash-equality shortcut).
+
+---
+
+## §10 The `ChainSource` seam & trust model
+
+dig-did performs **no network or chain I/O** (INV-1), yet lineage authentication needs to *read* chain
+state. `ChainSource` is the seam that reconciles the two — the caller supplies an honest reader; dig-did
+supplies all the trust logic. There is **no default impl** in dig-did: the consumer implements it over
+its own backend (coinset.org, a local full node, `chia-query`), keeping dig-did no-network and
+wasm-buildable.
+
+```rust
+pub trait ChainSource {
+    type Error: core::fmt::Display;
+    fn resolve_singleton_lineage(&self, launcher_id: Bytes32)
+        -> Result<Option<SingletonLineage>, Self::Error>;
+    fn parent_spend(&self, coin_id: Bytes32)
+        -> Result<Option<CoinSpend>, Self::Error>;
+}
+```
+
+- `resolve_singleton_lineage` MUST be a genuine forward walk from the DID launcher to its current
+  unspent tip, returning every coin id on the walk as a `SingletonLineage` (membership set + tip), or
+  `None` when the launcher never existed / the singleton is fully spent. It MUST NOT echo a
+  caller-supplied coin.
+- `parent_spend(coin_id)` MUST return the coin spend that CREATED `coin_id` (the spend of its parent
+  coin), or `None` when no such spend is known. It performs NO authentication — dig-did's walk parses
+  and verifies it.
+
+**Trust boundary.** The `ChainSource` MUST be the caller's OWN honest view of the chain, never an
+attacker-controlled channel. dig-did assumes the source reports real chain state; it cannot defend
+against a source that fabricates the chain itself. Given honest chain data, dig-did guarantees no coin
+can launder itself into a DID's authority (§5.1, §7). Every read failure or gap fails closed
+(`DidError::Chain` / the §5.1 errors), never an "assume owned" default.
+
+**Coherence.** `SingletonLineage` (tip + membership `contains`) is byte-coherent with dig-identity's
+type of the same name, so dig-identity can later de-duplicate onto dig-did (the lower foundation) without
+a behavioural change.

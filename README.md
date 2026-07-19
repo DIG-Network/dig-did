@@ -127,13 +127,15 @@ owner key unless noted.
 | `parse_did_coin_spend` | Parse a DID coin's own spend into the `Did` it spent + its p2 `Spend` (or `None` if not a DID). | — |
 | `did_info_from_puzzle` | Parse just a puzzle reveal into its `DidInfo`, without a coin or lineage proof. | — |
 | `resolve` | Project a DID's current state / DID document. | — |
+| `prove_lineage` | Prove a coin is rooted in a DID's identity (`Direct` or `LaunchedFrom`), over a `ChainSource` — returns an unforgeable `AncestryProof`; fail-closed. | — (pure verify) |
+| `walk_did_lineage_to_tip` | Walk a DID singleton to its current unspent tip (`DidTip { coin, info, proof }`), or `None` if unlaunched/melted. | — |
 | `did_string_from_launcher_id` / `launcher_id_from_did_string` | Encode/decode the canonical `did:chia:1…` string (bech32m, byte-agrees with `chia-sdk-utils`). | — |
 
-**Status:** `0.2` ships creation (`create_did`/`create_simple_did`/`create_eve_did_only`), hydration
-(`hydrate_did_from_parent_spend`/`parse_did_coin_spend`/`did_info_from_puzzle`), and the `did:chia:`
-string codec, on top of the `0.1` foundation (type surface, error taxonomy, signing boundary). The
-remaining operation modules above are declared and specified; each lands in its own release against
-this foundation. The table documents the complete designed interface.
+**Status:** `0.3` adds the **lineage-proof spine** — the `ChainSource` seam, `prove_lineage` +
+`AncestryProof`, and `walk_did_lineage_to_tip` ([`SPEC.md`](./SPEC.md) §5.1/§10) — on top of `0.2`
+(creation + hydration + `did:chia:` codec) and the `0.1` foundation (type surface, error taxonomy,
+signing boundary). The remaining operation modules above are declared and specified; each lands in its
+own release against this foundation. The table documents the complete designed interface.
 
 ---
 
@@ -145,6 +147,9 @@ this foundation. The table documents the complete designed interface.
 - `DidError` / `DidResult<T>` — the error taxonomy ([`SPEC.md`](./SPEC.md) §6).
 - `AggSigConstants`, `RequiredSignature` — re-exported so you can call and consume
   `required_signatures` without a direct chia-wallet-sdk dependency.
+- `ChainSource` — the caller-supplied honest chain reader (no default impl; see [`SPEC.md`](./SPEC.md) §10).
+- `AncestryProof` / `LineageModel` — the unforgeable output of `prove_lineage` (`Direct` | `LaunchedFrom`).
+- `SingletonLineage` / `DidTip` — a DID singleton's lineage (membership + tip) and its reconstructed tip.
 - `Coin`, `CoinSpend`, `Bytes32`, `Proof`, `LineageProof` — re-exported Chia wire types.
 
 ---
@@ -158,6 +163,8 @@ this foundation. The table documents the complete designed interface.
 | `sign` | `required_signatures` — the signing boundary. |
 | `create` / `update` / `recovery` / `transfer` / `launch` / `melt` / `attest` | The DID operations. |
 | `hydrate` / `resolve` | Reconstruction + projection from chain data. |
+| `resolve` (lineage) | `ChainSource` seam, `SingletonLineage`, `DidTip`, the singleton-authentication walk, `walk_did_lineage_to_tip`, `MAX_LINEAGE_DEPTH`. |
+| `lineage` | `prove_lineage`, `AncestryProof`, `LineageModel`. |
 | `did_string` | The `did:chia:1…` codec. |
 
 ---
