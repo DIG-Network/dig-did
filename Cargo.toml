@@ -51,8 +51,16 @@ chia-puzzles = "0.20"
 chia-sdk-utils = "0.30"
 # The crate error taxonomy (SPEC §6). thiserror 2 matches the sibling DIG crates.
 thiserror = "2"
+# The ONE canonical `ChainSource` provider interface (the trait + `SingletonLineage` + `CoinRecord`),
+# extracted from dig-did's original local trait and published to crates.io so every DIG consumer
+# depends on a single non-drifting contract (#1240). dig-did consumes the trait and re-exports it so
+# the `dig_did::ChainSource` path is preserved (INV-4 for the chain-read seam).
+dig-chainsource-interface = "0.1"
 
 [dev-dependencies]
+# The interface's in-memory `MockChainSource` (the `testing` feature) drives the fail-closed and
+# unlaunched/melted resolve paths without a live network.
+dig-chainsource-interface = { version = "0.1", features = ["testing"] }
 # The in-process Chia Simulator + BLS keypair helpers for building real coin spends in tests.
 chia-sdk-test = "0.30"
 # Hex assertions on computed signature messages / coin ids in tests.

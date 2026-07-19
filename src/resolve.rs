@@ -28,12 +28,11 @@
 //! itself into a DID's authority (see the adversarial tests). Every read failure or gap fails CLOSED —
 //! an error, never an "assume owned" default.
 
-use std::collections::BTreeSet;
-
 use chia_protocol::{Bytes32, Coin, CoinSpend, Program};
 use chia_puzzle_types::singleton::SingletonArgs;
 use chia_puzzle_types::Proof;
 use chia_puzzles::SINGLETON_LAUNCHER_HASH;
+use chia_sdk_utils::Address;
 use chia_wallet_sdk::driver::{Did, DidInfo, Layer, Puzzle, SingletonLayer};
 use chia_wallet_sdk::prelude::{Allocator, NodePtr};
 use chia_wallet_sdk::types::{run_puzzle, Condition};
@@ -42,6 +41,11 @@ use clvm_utils::TreeHash;
 
 use crate::error::{DidError, DidResult};
 
+// The chain-reading seam is the ONE canonical `dig-chainsource-interface` contract (#1240), not a
+// per-crate copy that could byte-drift. Re-exported here so the historical `dig_did::ChainSource` and
+// `dig_did::SingletonLineage` paths are preserved for downstream consumers.
+pub use dig_chainsource_interface::{ChainSource, SingletonLineage};
+
 /// The maximum number of parent-spend hops the singleton walk will follow before failing closed with
 /// [`DidError::LineageTooDeep`].
 ///
@@ -49,90 +53,6 @@ use crate::error::{DidError, DidResult};
 /// thousands of states over its lifetime, so the bound is generous. Its purpose is purely a DoS guard:
 /// a malicious [`ChainSource`] must not be able to make the walk loop unboundedly.
 pub const MAX_LINEAGE_DEPTH: usize = 100_000;
-
-/// A caller-supplied, honest READER of Chia chain state — the seam that keeps dig-did network-free
-/// (INV-1) while still authenticating on-chain lineage.
-///
-/// A consumer (dig-node, dig-chat, the extension, hub) implements this over its own chain backend
-/// (coinset.org, a local full node, `chia-query`). dig-did supplies all the trust logic on top; the
-/// source only fetches. See the module trust model — the source MUST be honest chain data and is never
-/// treated as a source of authority claims.
-pub trait ChainSource {
-    /// The source's own fetch/transport error, surfaced verbatim through [`DidError::Chain`].
-    type Error: core::fmt::Display;
-
-    /// Walks the singleton lineage from `launcher_id` to its current unspent tip, returning EVERY coin
-    /// id on that walk as a [`SingletonLineage`].
-    ///
-    /// Returns `None` when the launcher never existed or the singleton has been fully spent (melted).
-    /// The returned lineage is trusted as the DID singleton's authentic lineage — so this MUST be a
-    /// genuine forward walk from the DID launcher to its tip (each coin the singleton recreation of the
-    /// previous), NEVER an echo of a caller-supplied coin. The caller implements the walk against its
-    /// own chain backend.
-    fn resolve_singleton_lineage(
-        &self,
-        launcher_id: Bytes32,
-    ) -> Result<Option<SingletonLineage>, Self::Error>;
-
-    /// Returns the coin spend that CREATED `coin_id` — i.e. the spend of `coin_id`'s parent coin —
-    /// or `None` when no such spend is known (an unspent-parent / coinbase / genesis edge).
-    ///
-    /// This is the single primitive the singleton-authentication walk consumes: given a coin, it reads
-    /// the parent's puzzle reveal + solution, proves the parent is a singleton (or the launcher), and
-    /// derives the successor the parent created. The source only fetches; it performs NO authentication.
-    fn parent_spend(&self, coin_id: Bytes32) -> Result<Option<CoinSpend>, Self::Error>;
-}
-
-/// The lineage of a DID identity singleton: every coin id from the launcher spend forward to the
-/// current unspent tip.
-///
-/// Authority is MEMBERSHIP in this lineage, not equality with the tip: a coin launched from ANY genuine
-/// DID coin — the launch-time coin `Cn`, later spent to `Cn+1` — is rooted in the DID, while an
-/// attacker's coin (never a member, since minting any lineage coin requires the DID's key) is not. This
-/// is byte-coherent with dig-identity's `SingletonLineage` so the two crates can later de-duplicate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SingletonLineage {
-    /// The current unspent singleton tip coin id (the DID's current on-chain state handle).
-    tip: Bytes32,
-    /// Every coin id in the lineage (launcher -> tip inclusive). Always contains `tip`.
-    members: BTreeSet<Bytes32>,
-}
-
-impl SingletonLineage {
-    /// Builds a lineage from its full member set and current `tip`. `tip` is always treated as a
-    /// member, so a caller need not include it in `members` explicitly.
-    pub fn new(tip: Bytes32, members: impl IntoIterator<Item = Bytes32>) -> Self {
-        let mut members: BTreeSet<Bytes32> = members.into_iter().collect();
-        members.insert(tip);
-        Self { tip, members }
-    }
-
-    /// A degenerate single-coin lineage (the tip is the only member) — a DID never spent since launch.
-    pub fn single(tip: Bytes32) -> Self {
-        Self::new(tip, [tip])
-    }
-
-    /// The current unspent singleton tip coin id.
-    pub fn tip(&self) -> Bytes32 {
-        self.tip
-    }
-
-    /// Whether `coin_id` is a genuine coin in this singleton's lineage — the authority membership test.
-    pub fn contains(&self, coin_id: Bytes32) -> bool {
-        self.members.contains(&coin_id)
-    }
-
-    /// The number of coins in the lineage (launcher -> tip inclusive).
-    pub fn len(&self) -> usize {
-        self.members.len()
-    }
-
-    /// Whether the lineage has no members. Always `false` for a well-formed lineage (the tip is a
-    /// member), but provided so `len`/`is_empty` are consistent for lints and callers.
-    pub fn is_empty(&self) -> bool {
-        self.members.is_empty()
-    }
-}
 
 /// The current unspent tip of a DID singleton, reconstructed from chain reads: the tip coin, its
 /// [`DidInfo`], and the lineage [`Proof`] needed to spend it.
@@ -366,6 +286,81 @@ pub fn walk_did_lineage_to_tip<S: ChainSource>(
     }))
 }
 
+/// Resolves a DID's CURRENT owner XCH payment address from chain — the DID→address primitive
+/// (SPEC §3, U10).
+///
+/// Walks the DID singleton identified by `launcher_id` to its current authenticated tip and returns
+/// the tip owner's payment address: the tip's `p2_puzzle_hash` (SPEC §2.1, "the current owner's
+/// address") bech32m-encoded under `prefix`. `prefix` is the network HRP (`"xch"` mainnet, `"txch"`
+/// testnet) — dig-did stays network-agnostic and never hard-codes an HRP. This is a ChainSource-READ
+/// only: it never signs and never broadcasts (INV-1/INV-2).
+///
+/// # Money-critical soundness (why the extra walk)
+///
+/// This primitive routes payments, so a wrong answer silently pays the wrong recipient. The tip's
+/// curried `launcher_id` is attacker-chosen (the `pay_to_coin_wearing_a_singleton_puzzle_hash`
+/// attack class), so `tip.info.launcher_id() == launcher_id` is INSUFFICIENT. After walking to the
+/// tip this function runs [`authenticate_singleton`] — which walks the parent-spend chain to the
+/// GENUINE launcher — and requires that authenticated launcher to equal `launcher_id`. Only then is
+/// the address built. A dishonest [`ChainSource`] that echoes a DIFFERENT DID's tip for `launcher_id`
+/// is caught here as [`DidError::LauncherMismatch`], never resolved to the attacker's address.
+///
+/// # Returns
+///
+/// `Ok(Some(address))` for a launched, authenticated DID; `Ok(None)` when the DID has no current
+/// on-chain coin (unlaunched or melted). Every other failure is a typed, fail-closed [`DidError`]:
+///
+/// | Case | Result |
+/// |---|---|
+/// | unlaunched / melted | `Ok(None)` |
+/// | tip creating-spend absent | `Err(NoIdentitySingleton)` |
+/// | tip not a DID | `Err(NotDid)` |
+/// | tip not a genuine singleton (spoofed curry) | `Err(NotASingleton)` |
+/// | genuine launcher ≠ requested | `Err(LauncherMismatch)` |
+/// | chain read fails | `Err(Chain)` |
+/// | lineage over-deep | `Err(LineageTooDeep)` |
+/// | `Address::encode` fails (bad `prefix`) | `Err(Parse)` |
+pub fn resolve_xch_address<S: ChainSource>(
+    launcher_id: Bytes32,
+    prefix: &str,
+    source: &S,
+) -> DidResult<Option<Address>> {
+    let Some(tip) = walk_did_lineage_to_tip(source, launcher_id)? else {
+        return Ok(None);
+    };
+
+    // The money-critical guard: authenticate the tip's GENUINE launcher via the parent-spend walk,
+    // never the attacker-chosen curried launcher id on the tip itself.
+    let authenticated = authenticate_singleton(tip.coin.coin_id(), source)?;
+    if authenticated.launcher_id != launcher_id {
+        return Err(DidError::LauncherMismatch);
+    }
+
+    let address = Address::new(tip.info.p2_puzzle_hash, prefix.to_string());
+    // Validate the address encodes under `prefix` before returning it — a bad HRP fails closed here
+    // rather than handing back an address that cannot be rendered.
+    address
+        .encode()
+        .map_err(|error| DidError::Parse(error.to_string()))?;
+    Ok(Some(address))
+}
+
+/// Resolves a DID's current owner XCH payment address from its `did:chia:1…` string form — a
+/// convenience wrapper over [`resolve_xch_address`] (SPEC §3, U10).
+///
+/// Decodes `did` to its launcher id (see [`crate::launcher_id_from_did_string`]) and delegates. A
+/// malformed `did:chia:` string fails closed with [`DidError::InvalidDidString`] before any chain
+/// read. All other semantics — including the money-critical launcher authentication — match
+/// [`resolve_xch_address`].
+pub fn resolve_xch_address_from_did_string<S: ChainSource>(
+    did: &str,
+    prefix: &str,
+    source: &S,
+) -> DidResult<Option<Address>> {
+    let launcher_id = crate::launcher_id_from_did_string(did)?;
+    resolve_xch_address(launcher_id, prefix, source)
+}
+
 /// Deserializes a [`CoinSpend`]'s puzzle reveal and solution into the allocator, returning the parsed
 /// [`Puzzle`] and the solution [`NodePtr`].
 fn parse_spend(allocator: &mut Allocator, spend: &CoinSpend) -> DidResult<(Puzzle, NodePtr)> {
@@ -395,28 +390,256 @@ fn chain_error<E: core::fmt::Display>(error: E) -> DidError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
-    #[test]
-    fn lineage_membership_includes_tip_and_ancestors() {
-        let launcher = Bytes32::new([1u8; 32]);
-        let cn = Bytes32::new([2u8; 32]);
-        let tip = Bytes32::new([3u8; 32]);
-        let lineage = SingletonLineage::new(tip, [launcher, cn]);
+    use chia_puzzle_types::Memos;
+    use chia_wallet_sdk::driver::{SingletonInfo, SpendContext, StandardLayer};
+    use chia_wallet_sdk::test::Simulator;
+    use chia_wallet_sdk::types::Conditions;
+    use dig_chainsource_interface::{CoinRecord, MockChainSource};
 
-        assert!(lineage.contains(launcher));
-        assert!(lineage.contains(cn));
-        assert!(lineage.contains(tip));
-        assert!(!lineage.contains(Bytes32::new([9u8; 32])));
-        assert_eq!(lineage.tip(), tip);
-        assert_eq!(lineage.len(), 3);
-        assert!(!lineage.is_empty());
+    use crate::create::create_simple_did;
+    use crate::did_string::did_string_from_launcher_id;
+    use crate::types::Owner;
+
+    /// The mainnet payment-address HRP used across the resolve tests (dig-did itself is
+    /// network-agnostic — the caller passes the prefix).
+    const XCH: &str = "xch";
+
+    /// A DID freshly created and settled in the simulator, kept together with its owner so tests can
+    /// spend it further.
+    struct SettledDid {
+        did: Did,
+        launcher_id: Bytes32,
+    }
+
+    /// A chain view backed by the real in-process simulator, with a per-launcher lineage map that a
+    /// test can populate HONESTLY (the DID's own lineage) or DISHONESTLY (echoing another DID's tip
+    /// for a victim launcher — the money-critical attack). Everything except the lineage map is read
+    /// straight from the genuine simulator, so the parent-spend authentication walk always sees real
+    /// on-chain spends.
+    struct SimSource<'a> {
+        sim: &'a Simulator,
+        lineages: HashMap<Bytes32, SingletonLineage>,
+    }
+
+    impl ChainSource for SimSource<'_> {
+        type Error = String;
+
+        fn coin_record(&self, coin_id: Bytes32) -> Result<Option<CoinRecord>, Self::Error> {
+            Ok(self.sim.coin_state(coin_id).map(CoinRecord::from))
+        }
+
+        fn coin_records_by_puzzle_hash(
+            &self,
+            _puzzle_hash: Bytes32,
+            _include_spent: bool,
+        ) -> Result<Vec<CoinRecord>, Self::Error> {
+            Ok(Vec::new())
+        }
+
+        fn coin_records_by_parent(
+            &self,
+            _parent_coin_id: Bytes32,
+        ) -> Result<Vec<CoinRecord>, Self::Error> {
+            Ok(Vec::new())
+        }
+
+        fn coin_spend(&self, coin_id: Bytes32) -> Result<Option<CoinSpend>, Self::Error> {
+            let Some(state) = self.sim.coin_state(coin_id) else {
+                return Ok(None);
+            };
+            let (Some(reveal), Some(solution)) =
+                (self.sim.puzzle_reveal(coin_id), self.sim.solution(coin_id))
+            else {
+                return Ok(None);
+            };
+            Ok(Some(CoinSpend::new(state.coin, reveal, solution)))
+        }
+
+        fn resolve_singleton_lineage(
+            &self,
+            launcher_id: Bytes32,
+        ) -> Result<Option<SingletonLineage>, Self::Error> {
+            Ok(self.lineages.get(&launcher_id).cloned())
+        }
+
+        fn peak_height(&self) -> Result<Option<u32>, Self::Error> {
+            Ok(None)
+        }
+
+        fn block_timestamp(&self, _height: u32) -> Result<Option<u64>, Self::Error> {
+            Ok(None)
+        }
+    }
+
+    /// Creates and settles a fresh single-owner DID in `sim`, returning it plus its launcher id.
+    fn settle_did(sim: &mut Simulator, ctx: &mut SpendContext) -> anyhow::Result<SettledDid> {
+        let owner = sim.bls(1);
+        let spend = create_simple_did(ctx, owner.coin, Owner::Standard(owner.pk))?;
+        let did = spend.child.expect("create returns a child DID");
+        sim.spend_coins(spend.coin_spends, std::slice::from_ref(&owner.sk))?;
+        let launcher_id = did.info.launcher_id();
+        Ok(SettledDid { did, launcher_id })
+    }
+
+    /// The full lineage of a freshly-settled DID (launcher -> eve -> settled tip).
+    fn did_lineage(did: &Did) -> SingletonLineage {
+        SingletonLineage::new(
+            did.coin.coin_id(),
+            [
+                did.info.launcher_id(),
+                did.coin.parent_coin_info,
+                did.coin.coin_id(),
+            ],
+        )
+    }
+
+    /// An honest source reporting `did`'s own lineage for its launcher.
+    fn honest_source<'a>(sim: &'a Simulator, did: &Did) -> SimSource<'a> {
+        SimSource {
+            sim,
+            lineages: HashMap::from([(did.info.launcher_id(), did_lineage(did))]),
+        }
     }
 
     #[test]
-    fn single_lineage_is_tip_only() {
-        let tip = Bytes32::new([7u8; 32]);
-        let lineage = SingletonLineage::single(tip);
-        assert_eq!(lineage.len(), 1);
-        assert!(lineage.contains(tip));
+    fn resolve_happy_path_matches_the_owner_address() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let SettledDid { did, launcher_id } = settle_did(&mut sim, ctx)?;
+        let source = honest_source(&sim, &did);
+
+        let address = resolve_xch_address(launcher_id, XCH, &source)?
+            .expect("a launched, authenticated DID resolves to an address");
+
+        assert_eq!(address.puzzle_hash, did.info.p2_puzzle_hash);
+        assert_eq!(address.prefix, XCH);
+        let expected = Address::new(did.info.p2_puzzle_hash, XCH.to_string()).encode()?;
+        assert_eq!(address.encode()?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_address_roundtrips_through_decode() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let SettledDid { did, launcher_id } = settle_did(&mut sim, ctx)?;
+        let source = honest_source(&sim, &did);
+
+        let address = resolve_xch_address(launcher_id, XCH, &source)?.expect("resolves");
+        let decoded = Address::decode(&address.encode()?)?;
+
+        assert_eq!(decoded.puzzle_hash, did.info.p2_puzzle_hash);
+        assert_eq!(decoded.prefix, XCH);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_rejects_an_echoed_different_dids_tip() -> anyhow::Result<()> {
+        // THE money test. A dishonest source echoes an ATTACKER DID's real tip for the VICTIM's
+        // launcher. A naive resolver would walk to the attacker's tip, trust the tip's curried
+        // launcher id, and hand back the ATTACKER's payment address for the victim's DID — silently
+        // routing funds to the attacker. The parent-walk `authenticate_singleton` guard must catch it.
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let victim = settle_did(&mut sim, ctx)?;
+        let attacker = settle_did(&mut sim, ctx)?;
+
+        // The victim launcher resolves (dishonestly) to the ATTACKER's lineage tip.
+        let source = SimSource {
+            sim: &sim,
+            lineages: HashMap::from([(victim.launcher_id, did_lineage(&attacker.did))]),
+        };
+
+        let result = resolve_xch_address(victim.launcher_id, XCH, &source);
+        assert!(matches!(result, Err(DidError::LauncherMismatch)));
+
+        // Explicitly prove the guard prevented the wrong-recipient payment: the attacker's address is
+        // what a naive resolver would have returned, and resolve did NOT return it.
+        let attacker_address =
+            Address::new(attacker.did.info.p2_puzzle_hash, XCH.to_string()).encode()?;
+        assert!(
+            !matches!(result, Ok(Some(address)) if address.encode().ok() == Some(attacker_address))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_rejects_a_spoofed_curry_singleton() -> anyhow::Result<()> {
+        // A pay-to coin that merely WEARS a singleton outer puzzle hash for the launcher, minted from
+        // an ordinary coin (no genuine singleton recreation parent-spend). Fed as the echoed lineage
+        // tip, it must fail closed — never resolved to an address.
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let victim = settle_did(&mut sim, ctx)?;
+
+        let alice = sim.bls(1);
+        let alice_p2 = StandardLayer::new(alice.pk);
+        let fake_singleton_puzzle_hash: Bytes32 =
+            SingletonArgs::curry_tree_hash(victim.launcher_id, alice.puzzle_hash.into()).into();
+        alice_p2.spend(
+            ctx,
+            alice.coin,
+            Conditions::new().create_coin(fake_singleton_puzzle_hash, 1, Memos::None),
+        )?;
+        sim.spend_coins(ctx.take(), std::slice::from_ref(&alice.sk))?;
+
+        let fake_coin = Coin::new(alice.coin.coin_id(), fake_singleton_puzzle_hash, 1);
+        let source = SimSource {
+            sim: &sim,
+            lineages: HashMap::from([(
+                victim.launcher_id,
+                SingletonLineage::single(fake_coin.coin_id()),
+            )]),
+        };
+
+        let result = resolve_xch_address(victim.launcher_id, XCH, &source);
+        // Fail-closed: the tip is not a genuine singleton state of the DID, so it never parses into a
+        // resolvable owner. (The spoof is rejected at the DID/singleton gate, never as an address.)
+        assert!(matches!(
+            result,
+            Err(DidError::NotDid | DidError::NotASingleton)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_returns_none_for_unlaunched_or_melted() -> anyhow::Result<()> {
+        // An empty mock source reports no lineage for any launcher — the DID was never launched or has
+        // been fully melted. Absence is `Ok(None)`, never an error and never an address.
+        let source = MockChainSource::new();
+        let launcher_id: Bytes32 =
+            clvm_utils::tree_hash_atom(b"dig-did::resolve::unlaunched-launcher").into();
+
+        let resolved = resolve_xch_address(launcher_id, XCH, &source)?;
+        assert!(resolved.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_from_did_string_rejects_malformed() {
+        // A malformed did:chia string fails closed BEFORE any chain read.
+        let source = MockChainSource::new();
+        let error = resolve_xch_address_from_did_string("not-a-valid-did", XCH, &source)
+            .expect_err("a malformed did:chia string must fail closed");
+        assert!(matches!(error, DidError::InvalidDidString(_)));
+    }
+
+    #[test]
+    fn resolve_from_did_string_happy_path_matches_direct_resolution() -> anyhow::Result<()> {
+        // The string convenience fn agrees with the launcher-id form for a genuine DID.
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let SettledDid { did, launcher_id } = settle_did(&mut sim, ctx)?;
+        let source = honest_source(&sim, &did);
+
+        let did_string = did_string_from_launcher_id(launcher_id);
+        let via_string = resolve_xch_address_from_did_string(&did_string, XCH, &source)?
+            .expect("resolves via the did:chia string");
+        let via_launcher = resolve_xch_address(launcher_id, XCH, &source)?.expect("resolves");
+
+        assert_eq!(via_string.encode()?, via_launcher.encode()?);
+        Ok(())
     }
 }
