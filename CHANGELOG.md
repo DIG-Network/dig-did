@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.5.0] - 2026-08-08
+
+### Features
+- Adopt dig-chainsource-interface 0.3 and the chia 0.36 / sdk 0.34 family (#4)
+
 ## [0.4.0] - 2026-07-19
 
 ### Features
