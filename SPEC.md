@@ -28,7 +28,7 @@ Four invariants hold across the entire crate:
   the recreated child DID. Assembling and signing the `SpendBundle` is always the caller's
   responsibility.
 - **INV-4 — SDK byte-source-of-truth.** Every puzzle, layer, and coin-spend byte is produced by
-  `chia-wallet-sdk` (pinned to the **0.30 / chia-protocol 0.26** family — the version the whole DIG
+  `chia-wallet-sdk` (pinned to the **0.34 / chia-protocol 0.36** family — the version the whole DIG
   on-chain line rides). dig-did MUST NOT re-implement a DID puzzle or hand-roll a spend bundle; it
   adds DID-workflow ergonomics over the SDK primitives.
 
@@ -278,7 +278,7 @@ spendable and parseable by every later dig-did:
 
 An implementation conforms to this spec when:
 
-- Every produced `CoinSpend` **byte-agrees with chia-wallet-sdk 0.30** for the equivalent operation
+- Every produced `CoinSpend` **byte-agrees with chia-wallet-sdk 0.34** for the equivalent operation
   (INV-4). This crate satisfies it by construction (it calls the SDK).
 - The `did:chia:1…` codec **byte-agrees with `chia-sdk-utils` `Address`** (§2.3) — same hrp, same
   bech32m, round-trips every launcher id.

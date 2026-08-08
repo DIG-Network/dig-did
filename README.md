@@ -27,7 +27,7 @@ dig-did = "0.2"
 - **INV-3 — Unsigned output.** Every operation returns an unsigned `DidSpend`. Signing is always
   yours.
 - **INV-4 — SDK byte-source-of-truth.** Every puzzle/spend byte comes from `chia-wallet-sdk` (pinned
-  to the 0.30 / chia-protocol 0.26 family). dig-did adds DID-workflow ergonomics; it never
+  to the 0.34 / chia-protocol 0.36 family). dig-did adds DID-workflow ergonomics; it never
   re-implements a puzzle or hand-rolls a spend bundle.
 
 ---

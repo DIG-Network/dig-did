@@ -18,7 +18,7 @@
 //! - **INV-3 — Unsigned output.** Every operation returns an unsigned [`DidSpend`] — coin spends
 //!   plus the recreated child DID. Signatures are always the caller's responsibility.
 //! - **INV-4 — SDK byte-source-of-truth.** Every puzzle, layer, and coin-spend byte is produced by
-//!   `chia-wallet-sdk` (pinned to the 0.30 / chia-protocol 0.26 family). dig-did adds DID-workflow
+//!   `chia-wallet-sdk` (pinned to the 0.34 / chia-protocol 0.36 family). dig-did adds DID-workflow
 //!   ergonomics on top; it never re-implements a puzzle or hand-rolls a spend bundle.
 //!
 //! ## Consumer pattern
