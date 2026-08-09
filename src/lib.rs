@@ -54,6 +54,7 @@ mod context;
 mod test_support;
 
 // Public modules.
+pub mod amount;
 pub mod error;
 pub mod sign;
 pub mod types;
@@ -79,6 +80,7 @@ pub mod lineage;
 pub mod resolve;
 
 // The curated public surface — consumers depend on these paths, not the module layout.
+pub use amount::SingletonAmount;
 pub use create::{create_did, create_eve_did_only, create_simple_did};
 pub use did_string::{did_string_from_launcher_id, launcher_id_from_did_string, DID_CHIA_PREFIX};
 pub use error::{DidError, DidResult};

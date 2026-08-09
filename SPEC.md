@@ -171,6 +171,18 @@ Notes:
   requires `Owner::Standard` (§2.4). `create_eve_did_only` is the lower-level primitive that stops
   after the launcher spend, for a caller that wants to fold its own follow-up spend into the same
   bundle.
+- **The funding coin becomes the DID, in full.** A launch gives the singleton the funding coin's
+  ENTIRE amount; this crate emits no change output, because deciding where change goes is caller
+  policy, not a spend builder's. Two consequences bind every create entry point (`create_did`,
+  `create_simple_did`, `create_eve_did_only`):
+  - The amount MUST be ODD. A singleton is the odd-amount output of its launcher, so an even-amount
+    funding coin yields a bundle that spends the coin and creates no singleton at all — a total,
+    silent loss rather than a rejected spend. Creation MUST refuse it with `EvenSingletonAmount`.
+    The proof is carried by the `SingletonAmount` newtype, whose only constructor validates and
+    which every launch site MUST go through, so a future launch site cannot bypass the check.
+  - Any excess above the intended singleton amount is LOCKED in the identity coin permanently. The
+    caller MUST pass a coin pre-split to exactly the amount the DID should carry; `dig-account`'s
+    exact 1-mojo split is the reference pattern.
 - **Spend-with-conditions** (`spend_did_with_conditions`) spends the DID emitting the caller's
   conditions IN ADDITION to the recreation `CREATE_COIN` that preserves the DID unchanged (same
   inner puzzle hash, same amount, same owner hint). The recreation condition MUST be emitted FIRST,
@@ -291,6 +303,7 @@ not parse as a DID.
 | `InvalidDidString(String)` | A `did:chia:1…` string was malformed / failed bech32m decoding. |
 | `InvalidRecovery(String)` | An inconsistent recovery configuration was supplied. |
 | `UnsupportedOwner(&'static str)` | The operation must add conditions of its own and cannot honour `Owner::Custom` (§2.4). The message names the alternative. |
+| `EvenSingletonAmount(u64)` | A create entry point was given a funding coin with an even amount. The singleton is the odd-amount output of its launcher, so the launch would spend the coin and create no DID — the whole funding coin lost silently (§3, fail-closed). The `u64` is the offending amount. |
 | `OddAmountCreateCoin` | A caller passed an odd-amount `CREATE_COIN` to `spend_did_with_conditions`; the singleton's one odd-amount output is the DID's recreation, so the spend could never be valid on chain (§3, fail-closed). |
 | `AggSigUnsafeInConditions` | A caller passed an `AGG_SIG_UNSAFE` to `spend_did_with_conditions`. It is signed with no coin binding and no domain separation, so it induces a replayable signature under the DID owner's identity key over caller-chosen bytes (§3, fail-closed). |
 | `NonCanonicalCreateCoinAmount(String)` | A caller passed a `CREATE_COIN` whose amount atom is not chia's canonical integer encoding (negative, a redundant leading zero, or too many significant bytes). The typed condition surface decodes the amount unsigned, so such a spend would otherwise assemble here and be rejected at mempool admission (§3, fail-closed). The string renders the offending atom. |

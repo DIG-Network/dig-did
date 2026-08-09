@@ -16,6 +16,7 @@ use chia_puzzle_types::standard::StandardArgs;
 use chia_wallet_sdk::driver::{Did, HashedPtr, Launcher, SpendContext};
 use chia_wallet_sdk::types::Conditions;
 
+use crate::amount::SingletonAmount;
 use crate::context::{drain_coin_spends, inner_spend};
 use crate::error::{DidError, DidResult};
 use crate::types::{DidSpend, Owner};
@@ -27,6 +28,18 @@ use crate::types::{DidSpend, Owner};
 /// confirms the DID for wallets. Returns a [`DidSpend`] whose `child` is the fully-created,
 /// spendable [`Did`].
 ///
+/// # The funding coin becomes the DID, in full
+///
+/// The singleton's amount IS `funding_coin.amount` — the whole coin, because this crate builds
+/// spends and emits no change output (choosing where change goes is caller policy). Two
+/// consequences the caller owns:
+///
+/// - The amount MUST be ODD, or no singleton is created at all and the coin is spent for nothing.
+///   Refused here with [`crate::DidError::EvenSingletonAmount`].
+/// - Any excess is locked in the identity coin forever. Pass a coin pre-split to EXACTLY the amount
+///   the DID should carry — `dig-account` splits an exact 1-mojo coin off its source coin and calls
+///   in with that, which is the reference pattern.
+///
 /// # Signature
 ///
 /// Two `AGG_SIG_ME` signatures are required, both under whichever key/spend `owner` names
@@ -36,6 +49,7 @@ use crate::types::{DidSpend, Owner};
 /// # Errors
 ///
 /// - [`crate::DidError::UnsupportedOwner`] if `owner` is [`Owner::Custom`] — see below.
+/// - [`crate::DidError::EvenSingletonAmount`] if `funding_coin.amount` is even — see above.
 /// - Any chia-wallet-sdk driver failure (currying, spend construction) as
 ///   [`crate::DidError::Driver`].
 ///
@@ -70,8 +84,7 @@ pub fn create_did(
 ) -> DidResult<DidSpend> {
     let owner_puzzle_hash = standard_owner_puzzle_hash(owner, "create_did")?;
 
-    let launcher = Launcher::new(funding_coin.coin_id(), funding_coin.amount);
-    let (launch_conditions, eve) = launcher.create_eve_did(
+    let (launch_conditions, eve) = singleton_launcher(funding_coin)?.create_eve_did(
         ctx,
         owner_puzzle_hash,
         recovery_list_hash,
@@ -88,9 +101,15 @@ pub fn create_did(
 /// [`create_did`] with the common defaults: no recovery list, a single required verification, and
 /// nil metadata. The usual entry point for a DID that does not need a recovery configuration.
 ///
+/// # The funding coin becomes the DID, in full
+///
+/// This delegates to [`create_did`], so its funding-coin contract applies unchanged: the singleton's
+/// amount is the coin's ENTIRE amount, it MUST be odd, and any excess is locked in the DID forever.
+/// Pass a coin pre-split to exactly the intended amount.
+///
 /// # Errors
 ///
-/// See [`create_did`].
+/// See [`create_did`] — including [`crate::DidError::EvenSingletonAmount`].
 pub fn create_simple_did(
     ctx: &mut SpendContext,
     funding_coin: Coin,
@@ -106,13 +125,21 @@ pub fn create_simple_did(
 /// primitive when the caller intends to perform its own follow-up spend on the eve DID (e.g. to fold
 /// the settle into a larger spend bundle).
 ///
+/// # The funding coin becomes the DID, in full
+///
+/// Identical to [`create_did`]: the eve DID's amount is `funding_coin.amount` in full, it MUST be
+/// odd (else the coin is spent and no singleton exists), and any excess is locked in the identity
+/// coin. Pass a coin pre-split to exactly the intended amount — `dig-account`'s 1-mojo split is the
+/// reference pattern.
+///
 /// # Signature
 ///
 /// Exactly one `AGG_SIG_ME` is required, over the funding-coin spend, under `owner`'s key/spend.
 ///
 /// # Errors
 ///
-/// See [`create_did`] — including the [`Owner::Custom`] refusal, which applies here for reason 1
+/// See [`create_did`] — including [`crate::DidError::EvenSingletonAmount`] and the
+/// [`Owner::Custom`] refusal, which applies here for reason 1
 /// (the launcher conditions are produced inside this call and a pre-built spend cannot carry them).
 pub fn create_eve_did_only(
     ctx: &mut SpendContext,
@@ -124,8 +151,7 @@ pub fn create_eve_did_only(
 ) -> DidResult<DidSpend> {
     let owner_puzzle_hash = standard_owner_puzzle_hash(owner, "create_eve_did_only")?;
 
-    let launcher = Launcher::new(funding_coin.coin_id(), funding_coin.amount);
-    let (launch_conditions, eve) = launcher.create_eve_did(
+    let (launch_conditions, eve) = singleton_launcher(funding_coin)?.create_eve_did(
         ctx,
         owner_puzzle_hash,
         recovery_list_hash,
@@ -136,6 +162,18 @@ pub fn create_eve_did_only(
     spend_funding_coin(ctx, funding_coin, owner, launch_conditions)?;
 
     Ok(DidSpend::new(drain_coin_spends(ctx), Some(eve)))
+}
+
+/// The single place this crate builds a [`Launcher`] — the chokepoint that keeps an even funding
+/// amount out of every launch path.
+///
+/// The SDK's `Launcher::new(parent_coin_id, amount)` uses `amount` as BOTH the launcher solution's
+/// amount and the launched singleton's amount, and accepts any `u64`. Routing every launch through
+/// [`SingletonAmount`] means the odd-amount proof is carried in the type rather than repeated as a
+/// guard each launch site must remember; a new launch site cannot obtain a launcher without it.
+fn singleton_launcher(funding_coin: Coin) -> DidResult<Launcher> {
+    let amount = SingletonAmount::from_funding_coin(&funding_coin)?;
+    Ok(Launcher::new(funding_coin.coin_id(), amount.get()))
 }
 
 /// The DID's `p2_puzzle_hash` at creation — the gate that keeps [`Owner::Custom`] out of the create
@@ -310,6 +348,78 @@ mod tests {
             Owner::Standard(public_key),
             Conditions::new().reserve_fee(0),
         )
+    }
+
+    /// An even-amount funding coin is refused by EVERY creation entry point, naming the amount.
+    ///
+    /// Without the refusal all three assemble happily: the singleton's amount is the funding coin's
+    /// amount, an even-amount coin is not a singleton, so the bundle spends the coin and creates no
+    /// DID — a total loss with a success return. `sim.bls(2)` is a real, ordinary even coin, the
+    /// shape roughly half of arbitrary wallet coins have.
+    #[test]
+    fn every_creation_entry_point_refuses_an_even_funding_coin() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+
+        let owner = sim.bls(2);
+        assert_eq!(owner.coin.amount, 2, "the fixture must be genuinely even");
+
+        assert!(matches!(
+            create_simple_did(ctx, owner.coin, Owner::Standard(owner.pk)),
+            Err(DidError::EvenSingletonAmount(2))
+        ));
+        assert!(matches!(
+            create_did(
+                ctx,
+                owner.coin,
+                Owner::Standard(owner.pk),
+                None,
+                1,
+                HashedPtr::NIL
+            ),
+            Err(DidError::EvenSingletonAmount(2))
+        ));
+        assert!(matches!(
+            create_eve_did_only(
+                ctx,
+                owner.coin,
+                Owner::Standard(owner.pk),
+                None,
+                1,
+                HashedPtr::NIL
+            ),
+            Err(DidError::EvenSingletonAmount(2))
+        ));
+        Ok(())
+    }
+
+    /// The positive control for the refusal above: the SAME three entry points, given an odd
+    /// funding coin one mojo away from the refused fixture, each produce a bundle the simulator
+    /// accepts. Without this, a refusal that rejected every amount would look identical.
+    #[test]
+    fn every_creation_entry_point_accepts_an_odd_funding_coin() -> anyhow::Result<()> {
+        for build in [
+            (|ctx: &mut SpendContext, coin, owner| create_simple_did(ctx, coin, owner))
+                as fn(&mut SpendContext, Coin, Owner) -> DidResult<DidSpend>,
+            |ctx, coin, owner| create_did(ctx, coin, owner, None, 1, HashedPtr::NIL),
+            |ctx, coin, owner| create_eve_did_only(ctx, coin, owner, None, 1, HashedPtr::NIL),
+        ] {
+            let mut sim = Simulator::new();
+            let ctx = &mut SpendContext::new();
+
+            let owner = sim.bls(3);
+            assert_eq!(owner.coin.amount, 3, "the fixture must be genuinely odd");
+
+            let spend = build(ctx, owner.coin, Owner::Standard(owner.pk))?;
+            let child = spend.child.expect("create always returns a child DID");
+            assert_eq!(
+                child.coin.amount, 3,
+                "the singleton carries the funding coin's ENTIRE amount"
+            );
+
+            sim.spend_coins(spend.coin_spends, &[owner.sk])?;
+        }
+        Ok(())
     }
 
     /// A full recovery configuration round-trips through creation untouched.

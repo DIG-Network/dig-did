@@ -56,6 +56,23 @@ pub enum DidError {
     #[error("unsupported owner for this operation: {0}")]
     UnsupportedOwner(&'static str),
 
+    /// A funding coin with an EVEN amount was supplied to a DID launch. The `u64` is that amount.
+    ///
+    /// Chia's singleton top layer recognises only the launcher's ODD-amount output as the
+    /// singleton, and this crate's launch gives the singleton the funding coin's entire amount. An
+    /// even-amount funding coin therefore produces a bundle that spends the money and creates no
+    /// DID at all — a total, silent loss of the funding coin, not a rejected spend. Arbitrary
+    /// wallet coins are even about half the time.
+    ///
+    /// Split the funding coin down to exactly the odd amount the singleton should carry first
+    /// (`dig-account` splits to 1 mojo) and pass that coin (SPEC §3, fail-closed).
+    #[error(
+        "funding coin amount {0} is even: a singleton is the odd-amount output of its launcher, so \
+         this launch would spend the coin and create no DID — split the funding coin to an exact \
+         odd amount (1 mojo is conventional) first"
+    )]
+    EvenSingletonAmount(u64),
+
     /// A caller supplied an odd-amount `CREATE_COIN` to a DID-preserving spend. A singleton's inner
     /// puzzle may emit exactly ONE odd-amount `CREATE_COIN`, and the DID's own recreation occupies
     /// it, so a caller's odd-amount `CREATE_COIN` can never be valid here — most often an attempt to
