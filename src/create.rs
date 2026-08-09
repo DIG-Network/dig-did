@@ -170,9 +170,16 @@ pub fn create_eve_did_only(
 /// The SDK's `Launcher::new(parent_coin_id, amount)` uses `amount` as BOTH the launcher solution's
 /// amount and the launched singleton's amount, and accepts any `u64`. Routing every launch through
 /// [`SingletonAmount`] means the odd-amount proof is carried in the type rather than repeated as a
-/// guard each launch site must remember; a new launch site cannot obtain a launcher without it.
+/// guard each launch site must remember.
+///
+/// This is enforced, not merely conventional: `clippy.toml` puts `Launcher::new` on
+/// `disallowed-methods`, and CI runs `cargo clippy --all-targets -- -D warnings`. A new launch site
+/// that calls the SDK constructor directly therefore fails the build unless it explicitly opts out
+/// here, in a diff a reviewer sees.
 fn singleton_launcher(funding_coin: Coin) -> DidResult<Launcher> {
     let amount = SingletonAmount::from_funding_coin(&funding_coin)?;
+    // The one legitimate production call: `amount` is proven odd immediately above.
+    #[allow(clippy::disallowed_methods)]
     Ok(Launcher::new(funding_coin.coin_id(), amount.get()))
 }
 
@@ -220,6 +227,10 @@ fn spend_funding_coin(
 }
 
 #[cfg(test)]
+// Tests build launchers directly, on purpose: a fixture needs an arbitrary parent id, and some
+// fixtures need an amount the production chokepoint would (rightly) refuse. The lint guards
+// PRODUCTION launch sites; see the note on `singleton_launcher` in create.rs.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use chia_wallet_sdk::prelude::MAINNET_CONSTANTS;

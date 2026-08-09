@@ -115,10 +115,12 @@ DID-preserving spend MUST permit only: `REMARK`, even-amount `CREATE_COIN`, `RES
 announcement and message conditions, the `ASSERT_*` assertions (including timelocks and `ASSERT_MY_*`),
 and the `AGG_SIG_*` kinds bound to this spend's coin lineage (`AGG_SIG_ME`, `AGG_SIG_PARENT`,
 `AGG_SIG_PARENT_AMOUNT`, `AGG_SIG_PARENT_PUZZLE`). A coin id is unique to one coin; a parent id is
-NOT — every coin created by one spend shares it — so an `AGG_SIG_PARENT` signature is reusable
-across the coins that spend creates, including caller-created ones. Those kinds are permitted
-nonetheless: that set of coins is fixed when the parent is spent, so the signature cannot be carried
-outside this DID's lineage or replayed in a later generation. Everything else MUST be refused
+NOT — every coin created by one spend shares it — so an `AGG_SIG_PARENT` signature emitted by a DID
+spend is reusable by any SIBLING of that DID coin: the other outputs of the DID's PREVIOUS spend,
+not the coins this spend creates. Those kinds are permitted nonetheless, because that set is
+bounded: the signature cannot reach a later generation of the DID (each generation has a different
+parent id) and cannot become an off-domain assertion. It is NOT confined to coins the caller
+controls — see "Scope of the guarantee" below. Everything else MUST be refused
 (`DisallowedCondition`), including `SOFTFORK`, the magic `CREATE_COIN` forms (`MELT_SINGLETON`,
 `RUN_CAT_TAIL`, the NFT/data-store updaters), any condition the SDK cannot name, and
 `AGG_SIG_PUZZLE`/`AGG_SIG_AMOUNT`/`AGG_SIG_PUZZLE_AMOUNT` — a self-recreating DID keeps the puzzle
@@ -142,14 +144,17 @@ even-amount `CREATE_COIN` moves a caller-chosen amount of the caller's own bundl
 caller-chosen puzzle hash, and a permitted `CREATE_PUZZLE_ANNOUNCEMENT` is emitted by the DID coin
 verbatim — announcements are Chia's authority-granting primitive, so a permitted announcement is a
 grant of the DID's authority to another spend in the bundle, not merely a constraint on this one.
-The invariant that holds is this: **no permitted shape creates authority over anything outside the
-spend's own coin set.** Not every permitted shape is confined to the bundle's lifetime — an
-`AGG_SIG_PARENT` signature stays satisfiable at any future time by any coin parented to the DID
-coin, including one the caller created in this spend — but the coins it can ever apply to are fixed
-the moment the spend runs, and the caller already controls them. The guard prevents the DID owner's
-signature reaching a coin outside the spend's lineage or becoming an off-domain assertion; it does
-not sanitize a hostile caller, and no allowlist over a conditions passthrough can. A caller
-composing conditions from an untrusted source MUST review the bundle before signing.
+Neither is every permitted shape confined to the bundle's lifetime, nor to the spend's own coin set.
+An `AGG_SIG_PARENT` signature is bound to the DID coin's PARENT id, so it stays satisfiable by any
+future spend of any coin sharing that parent — the outputs of the DID's PREVIOUS spend, not anything
+this spend creates (a coin created here carries THIS coin's id as its parent id, a different value).
+That set was fixed before this spend was built and MAY include a coin an earlier caller paid to a
+third party, under a puzzle that third party chose. The bound that does hold: such a signature can
+never reach a later generation of the DID, and can never become an off-domain assertion. The guard
+does not sanitize a hostile caller, and no allowlist over a conditions passthrough can. A caller
+composing conditions from an untrusted source MUST review the bundle before signing, and where an
+`AGG_SIG_PARENT` is present MUST also account for what the DID's PREVIOUS spend created — which this
+bundle does not show.
 
 | Operation | Unit | Inputs | CoinSpends produced | Recreated child | Signature |
 |---|---|---|---|---|---|
@@ -183,7 +188,11 @@ Notes:
     funding coin yields a bundle that spends the coin and creates no singleton at all — a total,
     silent loss rather than a rejected spend. Creation MUST refuse it with `EvenSingletonAmount`.
     The proof is carried by the `SingletonAmount` newtype, whose only constructor validates and
-    which every launch site MUST go through, so a future launch site cannot bypass the check.
+    which every launch site MUST go through. The SDK's own launcher constructor takes a raw amount
+    and so could bypass the newtype; it MUST therefore be denied to new call sites by a lint
+    (`disallowed-methods` in `clippy.toml`, with CI running clippy as `-D warnings`), leaving one
+    annotated production exemption at the chokepoint. The newtype states the rule; the lint is what
+    makes bypassing it fail the build rather than merely break a convention.
   - Any excess above the intended singleton amount is LOCKED in the identity coin permanently. The
     caller MUST pass a coin pre-split to exactly the amount the DID should carry; `dig-account`'s
     exact 1-mojo split is the reference pattern.

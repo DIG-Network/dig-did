@@ -6,9 +6,14 @@
 //! half the time, so this is not an exotic input.
 //!
 //! [`SingletonAmount`] makes that state unrepresentable rather than merely refused. Its only
-//! constructor validates, its field is private, and it is the only type this crate will hand to a
-//! launcher — so a future launch site cannot reach the launcher without passing the check, the way
-//! a bare `if amount % 2 == 0` inside one function could be walked around by the next caller.
+//! constructor validates, its field is private, and it is the only type this crate hands to a
+//! launcher — unlike a bare `if amount % 2 == 0` inside one function, which the next caller can
+//! simply not write.
+//!
+//! The type alone does not stop a future author calling the SDK's `Launcher::new` directly, so that
+//! constructor is on `disallowed-methods` in `clippy.toml` and CI runs
+//! `cargo clippy --all-targets -- -D warnings`. A launch site that skips this check therefore fails
+//! the build; the single production exemption is annotated at `create::singleton_launcher`.
 
 use chia_protocol::Coin;
 
@@ -18,6 +23,16 @@ use crate::error::{DidError, DidResult};
 ///
 /// Construct with [`SingletonAmount::new`] or [`SingletonAmount::from_funding_coin`]; there is no
 /// other way to obtain one, and the inner value is only readable through [`SingletonAmount::get`].
+///
+/// # Why this is public when no public function takes one
+///
+/// It is a PRE-FLIGHT VALIDATOR for callers, not a parameter type: a wallet splitting a funding coin
+/// checks the amount it is about to split to — `SingletonAmount::new(amount)?` — BEFORE building the
+/// spend, and gets the same answer, from the same code, that `create_did` would give it afterwards.
+/// The create entry points take a `Coin` and validate internally, so the type appears in no
+/// signature today. (dig_ecosystem#2479 proposes promoting it so `dig-account` and `dig-merkle`
+/// share this one validated type instead of each restating the odd-amount rule; until then, keep it
+/// public — a consumer restating the rule is exactly the drift it exists to prevent.)
 ///
 /// # Money note
 ///
@@ -29,6 +44,11 @@ pub struct SingletonAmount(u64);
 impl SingletonAmount {
     /// The amount `dig-account` splits a funding coin down to before minting, and the smallest
     /// amount a singleton can carry. Callers with no reason to prefer another value should use it.
+    ///
+    /// This const is built in-module, so it bypasses [`SingletonAmount::new`]'s check — the same is
+    /// true of any const added beside it. Every such const MUST therefore carry an ODD value, and
+    /// MUST be covered by a test that re-validates it through `new` (`consts_are_odd…` below) rather
+    /// than asserting its literal number, so that an even one turns a test red.
     pub const MINIMAL: Self = Self(1);
 
     /// Proves `amount` is odd, and therefore usable as a singleton's amount.
@@ -118,8 +138,24 @@ mod tests {
         ));
     }
 
+    /// Pins the PROPERTY the in-module consts must have, not the number they happen to hold.
+    ///
+    /// `MINIMAL` is `Self(1)`, a construction that skips [`SingletonAmount::new`]. Asserting
+    /// `MINIMAL.get() == 1` would only catch a changed *value*; it would stay green if someone
+    /// added — or changed `MINIMAL` to — an EVEN const, which is the failure that actually loses a
+    /// funding coin. Re-validating through `new` fails on exactly that.
     #[test]
-    fn minimal_is_the_one_mojo_amount_dig_account_splits_to() {
-        assert_eq!(SingletonAmount::MINIMAL.get(), 1);
+    fn consts_are_odd_and_would_pass_the_constructor() {
+        assert_const_would_pass_the_constructor("MINIMAL", SingletonAmount::MINIMAL);
+    }
+
+    /// Re-validates an in-module const through the public constructor. Call it once per const added
+    /// to [`SingletonAmount`], from the test above.
+    fn assert_const_would_pass_the_constructor(name: &str, amount: SingletonAmount) {
+        assert!(
+            SingletonAmount::new(amount.get()).is_ok(),
+            "{name} = {} bypasses new(), so it must itself be odd",
+            amount.get()
+        );
     }
 }

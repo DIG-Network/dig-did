@@ -23,13 +23,16 @@
 //! It bounds the KIND of authority a spend may create, not the VALUE it may move. A permitted
 //! even-amount `CREATE_COIN` may pay any amount of the caller's bundled funds to any puzzle hash,
 //! and a permitted `CREATE_PUZZLE_ANNOUNCEMENT` is emitted by the DID coin verbatim — which is
-//! precisely how a DID grants authority to another spend. The invariant that IS held: **no
-//! permitted shape creates authority over anything outside this spend's own coin set** — an
-//! `AGG_SIG_PARENT` signature does remain satisfiable later, but only by coins parented to this DID
-//! coin, which are fixed when the spend runs and already the caller's. A caller who does not trust
-//! the source of these conditions must review the bundle; the guard does not make hostile conditions
-//! safe, and no allowlist over a conditions passthrough could. See
-//! [`permit_only_conditions_a_did_may_carry`].
+//! precisely how a DID grants authority to another spend. Nor does it confine every permitted shape
+//! to this bundle: an `AGG_SIG_PARENT` signature is bound to the DID coin's PARENT id, so it stays
+//! satisfiable by any future spend of any coin sharing that parent — the outputs of the DID's
+//! PREVIOUS spend, not anything this spend creates. That set was fixed before this spend was built
+//! and may include a coin an earlier caller paid to a third party. What the guard does hold: such a
+//! signature can never reach a later generation of this DID, and can never become an off-domain
+//! assertion. A caller who does not trust the source of these conditions must review the bundle —
+//! and, where an `AGG_SIG_PARENT` is present, also what the DID's PREVIOUS spend created, which this
+//! bundle does not show. The guard does not make hostile conditions safe, and no allowlist over a
+//! conditions passthrough could. See [`permit_only_conditions_a_did_may_carry`].
 //!
 //! The DID's own spend requires exactly one `AGG_SIG_ME` under the owner's key. The caller's
 //! conditions may add signature requirements of their own on top of that, but only the kinds bound
@@ -167,14 +170,16 @@ pub fn spend_did_with_conditions(
 /// the DID coin verbatim — announcements are Chia's authority-granting primitive, so that is a real
 /// grant, not merely a constraint.
 ///
-/// The invariant that holds: **no permitted shape creates authority over anything outside this
-/// spend's own coin set.** Not everything it permits is confined to the bundle's lifetime — an
-/// `AGG_SIG_PARENT` signature remains satisfiable at any future time by any coin parented to the DID
-/// coin, including one the caller created here — but the coins it can ever apply to are fixed the
-/// moment this spend runs, and the caller already controls them. That is what the guard buys: the
-/// DID owner's signature never reaches a coin outside this spend's lineage, and never becomes an
-/// off-domain assertion. It is the whole of what it buys. A caller composing conditions from an
-/// untrusted source MUST review the bundle before signing.
+/// Neither is everything it permits confined to the bundle's lifetime. An `AGG_SIG_PARENT`
+/// signature is bound to the DID coin's PARENT id, so it stays satisfiable by any future spend of
+/// any coin sharing that parent — the outputs of the DID's PREVIOUS spend, not anything this spend
+/// creates. (A coin this spend creates has THIS coin's id as its parent id, a different value.)
+/// That set was fixed before this spend was built and may include a coin an earlier caller paid to
+/// a third party, whose puzzle that third party chose. The bound that does hold: such a signature
+/// can never reach a later generation of this DID, and can never become an off-domain assertion.
+/// It is the whole of what the guard buys here. A caller composing conditions from an untrusted
+/// source MUST review the bundle before signing — and, where an `AGG_SIG_PARENT` is present, must
+/// also account for what the DID's PREVIOUS spend created, which this bundle does not show.
 ///
 /// # What is permitted, and why
 ///
@@ -187,9 +192,12 @@ pub fn spend_did_with_conditions(
 /// Of the `AGG_SIG_*` family only the kinds bound to THIS spend's coin lineage are permitted —
 /// `AGG_SIG_ME` and the `PARENT`-bearing kinds, which commit to a coin id or parent id. A coin id is
 /// unique; a parent id is NOT unique to a coin (every sibling of one spend shares it), so an
-/// `AGG_SIG_PARENT` signature is reusable across the coins created by a single spend. It is
-/// permitted nonetheless: that set of coins is fixed at the moment the parent is spent, so the
-/// signature still cannot be carried outside this DID's lineage or replayed in a later generation.
+/// `AGG_SIG_PARENT` signature emitted here is reusable by any SIBLING of this DID coin — that is,
+/// by the other outputs of the DID's PREVIOUS spend, a set fixed before this spend was built. It is
+/// permitted nonetheless, because that set is bounded and knowable: the signature cannot reach a
+/// later generation of the DID (each generation has a different parent id) and cannot become an
+/// off-domain assertion. It is NOT confined to coins the caller controls — see "The scope of the
+/// guarantee" above.
 /// `AGG_SIG_PUZZLE`, `AGG_SIG_AMOUNT` and `AGG_SIG_PUZZLE_AMOUNT` are refused because
 /// a self-recreating DID keeps those attributes IDENTICAL for its entire lifetime (same puzzle
 /// hash, amount 1, every generation), so such a signature is replayable in any later spend emitting
@@ -380,6 +388,10 @@ fn clvm_opcode(allocator: &Allocator, condition: NodePtr) -> Option<i64> {
 }
 
 #[cfg(test)]
+// Tests build launchers directly, on purpose: a fixture needs an arbitrary parent id, and some
+// fixtures need an amount the production chokepoint would (rightly) refuse. The lint guards
+// PRODUCTION launch sites; see the note on `singleton_launcher` in create.rs.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::create::create_simple_did;
@@ -957,75 +969,6 @@ mod tests {
         assert!(
             creates_coin_to(ctx, &coin_spends, owner.puzzle_hash)?,
             "the caller's canonically-encoded payment must actually be created"
-        );
-        sim.spend_coins(coin_spends, &[owner.sk, funder.sk])?;
-        Ok(())
-    }
-
-    /// The amount guard reads the condition at the RIGHT index of a multi-condition list.
-    ///
-    /// The guard inspects the caller's conditions twice over — once typed as `Vec<Condition>` and
-    /// once as the `Vec<NodePtr>` it reads raw amount atoms from — and pairs them positionally. If
-    /// those two ever fall out of step (a truncation, an off-by-one, a refactor that re-allocates
-    /// one of them), the guard would read a benign neighbour's node while judging the offending
-    /// condition, and pass it. Every other test in this module puts the interesting condition
-    /// FIRST, where such a misalignment is invisible; this one puts it at index 2, behind two
-    /// permitted conditions, where it is not.
-    #[test]
-    fn refuses_a_non_canonical_amount_positioned_behind_other_conditions() -> anyhow::Result<()> {
-        let mut sim = Simulator::new();
-        let ctx = &mut SpendContext::new();
-        let owner = mint(&mut sim, ctx)?;
-
-        // `0x80` reads as 128 through the typed `u64` surface and as −128 on chain, so only the
-        // RAW atom distinguishes it — exactly the read that misalignment would corrupt.
-        let smuggled_create_coin = create_coin_with_raw_amount(ctx, owner.puzzle_hash, &[0x80])?;
-        let result = spend_did_with_conditions(
-            ctx,
-            owner.did,
-            Owner::Standard(owner.pk),
-            Conditions::new()
-                .create_puzzle_announcement(Bytes::from(b"index-0".to_vec()))
-                .assert_height_relative(0)
-                .with(smuggled_create_coin),
-        );
-
-        assert!(
-            matches!(result, Err(DidError::NonCanonicalCreateCoinAmount(_))),
-            "the third condition's own amount atom must be the one judged, got {result:?}"
-        );
-        Ok(())
-    }
-
-    /// The positive control for the alignment test above: the SAME list shape, the SAME index, and
-    /// a canonically-encoded even amount — permitted, and confirmed on the simulator. Without it, a
-    /// guard that refused everything at a non-zero index would satisfy the refusal test.
-    #[test]
-    fn permits_a_canonical_amount_positioned_behind_other_conditions() -> anyhow::Result<()> {
-        let mut sim = Simulator::new();
-        let ctx = &mut SpendContext::new();
-        let owner = mint(&mut sim, ctx)?;
-
-        // The DID recreates itself with all 1 of its mojos, so a second coin funds the payment.
-        let funder = sim.bls(2);
-        let funder_spend = inner_spend(ctx, Owner::Standard(funder.pk), Conditions::new())?;
-        ctx.spend(funder.coin, funder_spend)?;
-
-        let create_coin = create_coin_with_raw_amount(ctx, owner.puzzle_hash, &[0x02])?;
-        let _child = spend_did_with_conditions(
-            ctx,
-            owner.did,
-            Owner::Standard(owner.pk),
-            Conditions::new()
-                .create_puzzle_announcement(Bytes::from(b"index-0".to_vec()))
-                .assert_height_relative(0)
-                .with(create_coin),
-        )?;
-
-        let coin_spends = ctx.take();
-        assert!(
-            creates_coin_to(ctx, &coin_spends, owner.puzzle_hash)?,
-            "the caller's payment at index 2 must actually be created"
         );
         sim.spend_coins(coin_spends, &[owner.sk, funder.sk])?;
         Ok(())

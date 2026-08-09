@@ -1,0 +1,9 @@
+# `Launcher::new` takes a raw `u64` amount and accepts an even one, which silently produces a spend
+# that consumes the funding coin and creates no singleton at all (SPEC §3 "Create"). Every launch in
+# this crate MUST go through `create::singleton_launcher`, which proves the amount odd via
+# `SingletonAmount` first. This lint is what makes "a new launch site cannot bypass the check" a
+# structural fact rather than a convention: a direct call fails CI (`-D warnings`) unless it is
+# explicitly annotated, which forces the exemption to be argued at the call site.
+disallowed-methods = [
+    { path = "chia_wallet_sdk::driver::Launcher::new", reason = "route launches through create::singleton_launcher, which proves the amount odd via SingletonAmount" },
+]
