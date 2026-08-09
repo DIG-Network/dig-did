@@ -172,10 +172,11 @@ pub fn create_eve_did_only(
 /// [`SingletonAmount`] means the odd-amount proof is carried in the type rather than repeated as a
 /// guard each launch site must remember.
 ///
-/// This is enforced, not merely conventional: `clippy.toml` puts `Launcher::new` on
-/// `disallowed-methods`, and CI runs `cargo clippy --all-targets -- -D warnings`. A new launch site
-/// that calls the SDK constructor directly therefore fails the build unless it explicitly opts out
-/// here, in a diff a reviewer sees.
+/// This is enforced, not merely conventional: `clippy.toml` puts EVERY route to a raw amount on
+/// `disallowed-methods` — all five `Launcher` constructors plus `with_singleton_amount`, which
+/// would otherwise overwrite a proven-odd amount on a launcher obtained from here — and CI runs
+/// `cargo clippy --all-targets -- -D warnings`. A new launch site that reaches the SDK directly
+/// therefore fails the build unless it explicitly opts out, in a diff a reviewer sees.
 fn singleton_launcher(funding_coin: Coin) -> DidResult<Launcher> {
     let amount = SingletonAmount::from_funding_coin(&funding_coin)?;
     // The one legitimate production call: `amount` is proven odd immediately above.

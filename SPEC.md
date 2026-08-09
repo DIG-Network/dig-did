@@ -149,7 +149,9 @@ An `AGG_SIG_PARENT` signature is bound to the DID coin's PARENT id, so it stays 
 future spend of any coin sharing that parent — the outputs of the DID's PREVIOUS spend, not anything
 this spend creates (a coin created here carries THIS coin's id as its parent id, a different value).
 That set was fixed before this spend was built and MAY include a coin an earlier caller paid to a
-third party, under a puzzle that third party chose. The bound that does hold: such a signature can
+third party, under a puzzle that third party chose. For the EVE generation the previous spend is the
+LAUNCHER's, whose only output is the eve coin itself, so the sibling set is empty and the exposure is
+nil; it opens from the first ordinary spend onwards. The bound that does hold: such a signature can
 never reach a later generation of the DID, and can never become an off-domain assertion. The guard
 does not sanitize a hostile caller, and no allowlist over a conditions passthrough can. A caller
 composing conditions from an untrusted source MUST review the bundle before signing, and where an
@@ -188,10 +190,13 @@ Notes:
     funding coin yields a bundle that spends the coin and creates no singleton at all — a total,
     silent loss rather than a rejected spend. Creation MUST refuse it with `EvenSingletonAmount`.
     The proof is carried by the `SingletonAmount` newtype, whose only constructor validates and
-    which every launch site MUST go through. The SDK's own launcher constructor takes a raw amount
-    and so could bypass the newtype; it MUST therefore be denied to new call sites by a lint
-    (`disallowed-methods` in `clippy.toml`, with CI running clippy as `-D warnings`), leaving one
-    annotated production exemption at the chokepoint. The newtype states the rule; the lint is what
+    which every launch site MUST go through. EVERY SDK route by which a launcher can take a raw
+    amount — each of its constructors AND any amount mutator on the built launcher — could bypass
+    the newtype, so ALL of them MUST be denied to new call sites by a lint (`disallowed-methods` in
+    `clippy.toml`, with CI running clippy as `-D warnings`), leaving one annotated production
+    exemption at the chokepoint. Denying only the primary constructor is NOT sufficient and MUST NOT
+    be read as conformance; an SDK upgrade that adds a route MUST extend the denial in the same unit
+    of work. The newtype states the rule; the lint is what
     makes bypassing it fail the build rather than merely break a convention.
   - Any excess above the intended singleton amount is LOCKED in the identity coin permanently. The
     caller MUST pass a coin pre-split to exactly the amount the DID should carry; `dig-account`'s
@@ -344,6 +349,18 @@ Error messages MUST be descriptive and MUST NOT include secret material.
 - **`AGG_SIG_ME` binding.** Owner operations bind their signature to the specific coin being spent
   (§4), preventing signature replay across coins. dig-did never emits an `AGG_SIG_UNSAFE` over
   caller bytes.
+- **Bounded, NOT eliminated, exposure through the conditions passthrough.**
+  `spend_did_with_conditions` emits caller-supplied conditions under the DID's authority, judged by
+  an allowlist (§3). The allowlist bounds the KIND of authority created; it bounds neither the VALUE
+  moved nor the lifetime of what it creates. Two residual exposures are properties of the design,
+  not defects: a permitted even-amount `CREATE_COIN` pays caller-chosen amounts of the caller's own
+  bundled funds to caller-chosen puzzle hashes, and a permitted `AGG_SIG_PARENT` induces a signature
+  bound to the DID coin's PARENT id — satisfiable at any future time by any coin sharing that parent
+  (the outputs of the DID's PREVIOUS spend, which MAY include a coin paid to a third party under a
+  puzzle that party chose), though never by a later generation of the DID and never as an off-domain
+  assertion. A caller composing conditions from an untrusted source MUST review the bundle before
+  signing, and where an `AGG_SIG_PARENT` is present MUST also account for what the DID's previous
+  spend created — which the bundle does not show (§3 "Scope of the guarantee").
 - **Fail-closed hydration.** Ambiguous or under-specified chain data is an error, not a guess (§5),
   so a caller never signs against a mis-reconstructed DID.
 - **Deterministic byte output.** Given identical inputs, dig-did produces identical `CoinSpend`

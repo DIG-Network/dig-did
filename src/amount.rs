@@ -10,8 +10,9 @@
 //! launcher — unlike a bare `if amount % 2 == 0` inside one function, which the next caller can
 //! simply not write.
 //!
-//! The type alone does not stop a future author calling the SDK's `Launcher::new` directly, so that
-//! constructor is on `disallowed-methods` in `clippy.toml` and CI runs
+//! The type alone does not stop a future author reaching the SDK's launcher directly, so EVERY
+//! route by which a launcher can take a raw amount — all five of its constructors and its
+//! `with_singleton_amount` mutator — is on `disallowed-methods` in `clippy.toml`, and CI runs
 //! `cargo clippy --all-targets -- -D warnings`. A launch site that skips this check therefore fails
 //! the build; the single production exemption is annotated at `create::singleton_launcher`.
 

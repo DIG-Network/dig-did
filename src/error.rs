@@ -99,10 +99,20 @@ pub enum DidError {
     /// contract is that the caller signs every message `required_signatures` reports, such a
     /// requirement is never legitimate in a DID spend and is refused (SPEC §5, fail-closed).
     ///
-    /// This refusal removes the one shape whose damage OUTLIVES the bundle; it does not make a
-    /// hostile condition set safe. The permitted shapes still move the caller's own bundled funds
-    /// to caller-chosen puzzle hashes and still emit announcements under the DID's authority, so a
-    /// caller composing conditions from an untrusted source MUST review the bundle before signing.
+    /// This refusal removes the UNBOUNDED shape, not every shape whose damage outlives the bundle.
+    /// A permitted `AGG_SIG_PARENT` also outlives it: that signature is bound to the DID coin's
+    /// PARENT id, so it stays satisfiable by any future spend of any coin sharing that parent — the
+    /// other outputs of the DID's PREVIOUS spend, not anything this spend creates. That set was
+    /// fixed before this spend was built and MAY include a coin an earlier caller paid to a third
+    /// party, under a puzzle that third party chose. What the refusal buys is a BOUND, not an end
+    /// to persistence: unlike `AGG_SIG_UNSAFE`, a permitted signature can never reach a later
+    /// generation of the DID and can never become an off-domain assertion.
+    ///
+    /// Nor does it make a hostile condition set safe. The permitted shapes still move the caller's
+    /// own bundled funds to caller-chosen puzzle hashes and still emit announcements under the
+    /// DID's authority. A caller composing conditions from an untrusted source MUST review the
+    /// bundle before signing — and, where an `AGG_SIG_PARENT` is present, MUST also account for
+    /// what the DID's PREVIOUS spend created, which this bundle does not show.
     #[error(
         "caller supplied an AGG_SIG_UNSAFE condition: it is signed with no coin binding and no \
          domain separation, so the resulting signature is replayable against any other spend — a \

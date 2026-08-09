@@ -175,7 +175,9 @@ pub fn spend_did_with_conditions(
 /// any coin sharing that parent — the outputs of the DID's PREVIOUS spend, not anything this spend
 /// creates. (A coin this spend creates has THIS coin's id as its parent id, a different value.)
 /// That set was fixed before this spend was built and may include a coin an earlier caller paid to
-/// a third party, whose puzzle that third party chose. The bound that does hold: such a signature
+/// a third party, whose puzzle that third party chose. For the EVE generation the previous spend is
+/// the LAUNCHER's, whose only output is the eve coin itself, so the sibling set is empty and the
+/// exposure is nil; it opens from the first ordinary spend onwards. The bound that does hold: such a signature
 /// can never reach a later generation of this DID, and can never become an off-domain assertion.
 /// It is the whole of what the guard buys here. A caller composing conditions from an untrusted
 /// source MUST review the bundle before signing — and, where an `AGG_SIG_PARENT` is present, must
@@ -194,10 +196,11 @@ pub fn spend_did_with_conditions(
 /// unique; a parent id is NOT unique to a coin (every sibling of one spend shares it), so an
 /// `AGG_SIG_PARENT` signature emitted here is reusable by any SIBLING of this DID coin — that is,
 /// by the other outputs of the DID's PREVIOUS spend, a set fixed before this spend was built. It is
-/// permitted nonetheless, because that set is bounded and knowable: the signature cannot reach a
-/// later generation of the DID (each generation has a different parent id) and cannot become an
-/// off-domain assertion. It is NOT confined to coins the caller controls — see "The scope of the
-/// guarantee" above.
+/// permitted nonetheless, because that set is BOUNDED: the signature cannot reach a later
+/// generation of the DID (each generation has a different parent id) and cannot become an
+/// off-domain assertion. Bounded is not the same as visible — enumerating the set requires fetching
+/// the DID's previous spend, which this bundle does not contain. It is also NOT confined to coins
+/// the caller controls — see "The scope of the guarantee" above.
 /// `AGG_SIG_PUZZLE`, `AGG_SIG_AMOUNT` and `AGG_SIG_PUZZLE_AMOUNT` are refused because
 /// a self-recreating DID keeps those attributes IDENTICAL for its entire lifetime (same puzzle
 /// hash, amount 1, every generation), so such a signature is replayable in any later spend emitting
