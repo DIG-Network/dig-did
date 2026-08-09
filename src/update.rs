@@ -268,6 +268,10 @@ mod tests {
             creates_coin_to(ctx, &coin_spends, recreated_puzzle_hash)?,
             "the DID must still recreate itself"
         );
+        assert!(
+            creates_coin_to(ctx, &coin_spends, owner.puzzle_hash)?,
+            "and the caller's coin must actually be created"
+        );
         sim.spend_coins(coin_spends, &[owner.sk, funder.sk])?;
         Ok(())
     }
