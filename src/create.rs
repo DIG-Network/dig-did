@@ -6,18 +6,18 @@
 //! spend that confirms the DID's metadata so wallets can parse it. All three land in one
 //! [`DidSpend`] — dig-did never splits a create across multiple return values.
 //!
-//! Every builder here is generic over [`Owner`] (§2.4): a [`Owner::Standard`] key or a
-//! [`Owner::Custom`] pre-built inner spend both work, because the settle step is built from the raw
-//! [`chia_wallet_sdk::driver::Spend`] primitive (`Did::spend`) rather than a typed inner layer.
+//! Creation requires [`Owner::Standard`] (§2.4). [`Owner::Custom`] is REFUSED with
+//! [`crate::DidError::UnsupportedOwner`]: both spends in a create emit conditions that are only
+//! computable inside this call, and a pre-built inner spend cannot carry them. See the
+//! `# Owner::Custom` section on [`create_did`] for the three independent reasons.
 
 use chia_protocol::{Bytes32, Coin};
 use chia_puzzle_types::standard::StandardArgs;
-use chia_wallet_sdk::driver::{Did, HashedPtr, Launcher, SingletonInfo, SpendContext};
+use chia_wallet_sdk::driver::{Did, HashedPtr, Launcher, SpendContext};
 use chia_wallet_sdk::types::Conditions;
-use clvm_utils::tree_hash;
 
 use crate::context::{drain_coin_spends, inner_spend};
-use crate::error::DidResult;
+use crate::error::{DidError, DidResult};
 use crate::types::{DidSpend, Owner};
 
 /// Mints a brand-new DID, fully settled and wallet-parseable, from a funding coin.
@@ -35,16 +35,31 @@ use crate::types::{DidSpend, Owner};
 ///
 /// # Errors
 ///
-/// Propagates any chia-wallet-sdk driver failure (currying, spend construction) as
-/// [`crate::DidError::Driver`].
+/// - [`crate::DidError::UnsupportedOwner`] if `owner` is [`Owner::Custom`] — see below.
+/// - Any chia-wallet-sdk driver failure (currying, spend construction) as
+///   [`crate::DidError::Driver`].
 ///
 /// # Owner::Custom
 ///
-/// When using `Owner::Custom(spend)`, the ONE caller-supplied inner spend is used for BOTH the
-/// funding-coin spend and the settle spend. The caller is responsible for ensuring the custom spend
-/// emits all conditions needed to satisfy both steps; conditions are not added by dig-did for a
-/// custom spend. A custom create-spend that omits required conditions will fail closed with a parse
-/// error, never a custody leak.
+/// Refused. A create is two spends of two different coins, and a pre-built inner spend is one fixed
+/// `(puzzle, solution)` pair emitting one fixed condition set, so it cannot serve both. Three
+/// independent reasons, each sufficient on its own:
+///
+/// 1. **Different coins, one condition set.** The funding coin must emit the launcher's
+///    create/announcement conditions; the DID coin must emit its own recreation. One spend cannot
+///    emit both.
+/// 2. **Circular.** The recreation condition needs `did.info.inner_puzzle_hash()`, which does not
+///    exist until `create_eve_did` has run *inside* this call. No caller can precompute it.
+/// 3. **Actively wrong, not merely insufficient.** With a custom owner the DID's p2 puzzle IS the
+///    caller's puzzle, so replaying that solution on the DID coin re-emits the FUNDING conditions —
+///    a second launcher `CREATE_COIN` from the DID coin, not a settle.
+///
+/// Additionally, any `AGG_SIG_ME` baked into a custom spend is coin-bound and therefore valid for at
+/// most one of the two coins.
+///
+/// A caller that genuinely needs a custom DID p2 puzzle wants a launch-conditions builder it can
+/// compose into its own parent spend (mirroring `dig_merkle`'s `mint_datastore_launch_with_kind`),
+/// not this end-to-end builder.
 pub fn create_did(
     ctx: &mut SpendContext,
     funding_coin: Coin,
@@ -53,7 +68,7 @@ pub fn create_did(
     num_verifications_required: u64,
     metadata: HashedPtr,
 ) -> DidResult<DidSpend> {
-    let owner_puzzle_hash = owner_puzzle_hash(ctx, owner)?;
+    let owner_puzzle_hash = standard_owner_puzzle_hash(owner, "create_did")?;
 
     let launcher = Launcher::new(funding_coin.coin_id(), funding_coin.amount);
     let (launch_conditions, eve) = launcher.create_eve_did(
@@ -97,7 +112,8 @@ pub fn create_simple_did(
 ///
 /// # Errors
 ///
-/// See [`create_did`].
+/// See [`create_did`] — including the [`Owner::Custom`] refusal, which applies here for reason 1
+/// (the launcher conditions are produced inside this call and a pre-built spend cannot carry them).
 pub fn create_eve_did_only(
     ctx: &mut SpendContext,
     funding_coin: Coin,
@@ -106,7 +122,7 @@ pub fn create_eve_did_only(
     num_verifications_required: u64,
     metadata: HashedPtr,
 ) -> DidResult<DidSpend> {
-    let owner_puzzle_hash = owner_puzzle_hash(ctx, owner)?;
+    let owner_puzzle_hash = standard_owner_puzzle_hash(owner, "create_eve_did_only")?;
 
     let launcher = Launcher::new(funding_coin.coin_id(), funding_coin.amount);
     let (launch_conditions, eve) = launcher.create_eve_did(
@@ -122,30 +138,34 @@ pub fn create_eve_did_only(
     Ok(DidSpend::new(drain_coin_spends(ctx), Some(eve)))
 }
 
-/// The puzzle hash of the p2 puzzle `owner` names — the DID's `p2_puzzle_hash` at creation.
+/// The DID's `p2_puzzle_hash` at creation — the gate that keeps [`Owner::Custom`] out of the create
+/// path (see [`create_did`]'s `# Owner::Custom` section for why it cannot work here).
 ///
-/// [`Owner::Standard`] curries the standard-puzzle tree hash directly (no CLVM run needed);
-/// [`Owner::Custom`] hashes the caller's already-built inner puzzle.
-fn owner_puzzle_hash(ctx: &SpendContext, owner: Owner) -> DidResult<Bytes32> {
-    Ok(match owner {
-        Owner::Standard(public_key) => StandardArgs::curry_tree_hash(public_key).into(),
-        Owner::Custom(spend) => tree_hash(ctx, spend.puzzle).into(),
-    })
+/// `operation` names the caller so the refusal message points at the function the user actually
+/// called.
+fn standard_owner_puzzle_hash(owner: Owner, operation: &'static str) -> DidResult<Bytes32> {
+    match owner {
+        Owner::Standard(public_key) => Ok(StandardArgs::curry_tree_hash(public_key).into()),
+        Owner::Custom(_) => Err(DidError::UnsupportedOwner(match operation {
+            "create_eve_did_only" => {
+                "create_eve_did_only requires Owner::Standard; a pre-built custom inner spend \
+                 cannot emit the launcher conditions, which are only computable inside this call — \
+                 build the launch yourself with Launcher::create_eve_did"
+            }
+            _ => {
+                "create_did requires Owner::Standard; a pre-built custom inner spend cannot emit \
+                 both the launcher conditions and the DID's recreation — build the launch yourself \
+                 with Launcher::create_eve_did"
+            }
+        })),
+    }
 }
 
 /// Performs the owner-update ("settle") spend that leaves the DID's metadata/p2 puzzle unchanged but
-/// makes it wallet-parseable — the same effect as [`Did::update`], generalized over [`Owner`] (which
-/// `Did::update` cannot be, since it requires a typed `SpendWithConditions` inner layer).
+/// makes it wallet-parseable — the no-condition case of [`crate::spend_did_with_conditions`], which
+/// owns the recreation logic so there is exactly one code path for it.
 fn settle(ctx: &mut SpendContext, did: Did, owner: Owner) -> DidResult<Did> {
-    let unchanged_inner_puzzle_hash: Bytes32 = did.info.inner_puzzle_hash().into();
-    let memos = ctx.hint(did.info.p2_puzzle_hash)?;
-    let settle_conditions =
-        Conditions::new().create_coin(unchanged_inner_puzzle_hash, did.coin.amount, memos);
-
-    let spend = inner_spend(ctx, owner, settle_conditions)?;
-    did.spend(ctx, spend)?.ok_or_else(|| {
-        crate::error::DidError::Parse("settle spend produced no successor DID".into())
-    })
+    crate::update::spend_did_with_conditions(ctx, did, owner, Conditions::new())
 }
 
 /// Spends the funding coin under `owner`, emitting the launcher's create/announcement conditions —
@@ -215,6 +235,81 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    /// A pre-built inner spend cannot emit the launcher conditions, so creation refuses it outright.
+    ///
+    /// Before this refusal, `create_eve_did_only` returned `Ok` with an eve DID while the bundle
+    /// contained no `CREATE_COIN` to `SINGLETON_LAUNCHER_HASH` at all — a DID that could never
+    /// exist. That silent-drop reproduction is preserved as the control below.
+    #[test]
+    fn create_did_refuses_a_custom_owner() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+
+        let owner = sim.bls(1);
+        let prebuilt = prebuilt_inner_spend(ctx, owner.pk)?;
+
+        assert!(matches!(
+            create_simple_did(ctx, owner.coin, Owner::Custom(prebuilt)),
+            Err(DidError::UnsupportedOwner(_))
+        ));
+        assert!(matches!(
+            create_eve_did_only(
+                ctx,
+                owner.coin,
+                Owner::Custom(prebuilt),
+                None,
+                1,
+                HashedPtr::NIL
+            ),
+            Err(DidError::UnsupportedOwner(_))
+        ));
+        Ok(())
+    }
+
+    /// The control that makes the refusal load-bearing: the same custom spend, routed through the
+    /// underlying SDK launcher the way the old code did, produces a bundle with NO launcher
+    /// `CREATE_COIN`. This is the outcome the refusal now prevents; if it ever stops holding, the
+    /// refusal above is guarding a defect that no longer exists and should be re-derived.
+    #[test]
+    fn a_custom_inner_spend_would_silently_drop_the_launcher_conditions() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+
+        let owner = sim.bls(1);
+        let prebuilt = prebuilt_inner_spend(ctx, owner.pk)?;
+
+        let launcher = Launcher::new(owner.coin.coin_id(), owner.coin.amount);
+        let (_dropped_launch_conditions, _eve) =
+            launcher.create_eve_did(ctx, owner.puzzle_hash, None, 1, HashedPtr::NIL)?;
+        // Exactly what the old `spend_funding_coin` did with an `Owner::Custom`: the conditions go
+        // nowhere, because a pre-built spend is used verbatim.
+        ctx.spend(owner.coin, prebuilt)?;
+
+        let coin_spends = drain_coin_spends(ctx);
+        assert!(
+            !crate::test_support::creates_coin_to(
+                ctx,
+                &coin_spends,
+                chia_puzzles::SINGLETON_LAUNCHER_HASH.into(),
+            )?,
+            "nothing in the bundle creates the launcher the eve DID was supposedly launched from"
+        );
+        Ok(())
+    }
+
+    /// A syntactically valid inner spend that emits a condition of its own — the most favourable
+    /// custom spend a caller could plausibly supply.
+    fn prebuilt_inner_spend(
+        ctx: &mut SpendContext,
+        public_key: chia_wallet_sdk::prelude::PublicKey,
+    ) -> DidResult<chia_wallet_sdk::driver::Spend> {
+        inner_spend(
+            ctx,
+            Owner::Standard(public_key),
+            Conditions::new().reserve_fee(0),
+        )
     }
 
     /// A full recovery configuration round-trips through creation untouched.

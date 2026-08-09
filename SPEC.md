@@ -86,6 +86,13 @@ yields `DidError::InvalidDidString`.
   vault, multisig, delegated puzzle). dig-did passes it through unchanged; the caller owns its
   signature requirements.
 
+An operation that must add conditions of its own MUST refuse `Owner::Custom` with
+`DidError::UnsupportedOwner`, naming the alternative. A pre-built spend emits one fixed condition
+set, so those conditions would be silently dropped and the operation would return a well-formed
+bundle that creates none of the coins it reports. This binds `create_did`, `create_eve_did_only`
+(both add launcher conditions computed inside the call) and `spend_did_with_conditions` (which adds
+the DID's recreation condition).
+
 ---
 
 ## §3 Operations
@@ -93,8 +100,8 @@ yields `DidError::InvalidDidString`.
 Every operation returns `Result<DidSpend, DidError>` where `DidSpend = { coin_spends:
 Vec<CoinSpend>, child: Option<Did> }`. `child` is the DID as it will exist after the spends confirm
 (`None` only for a terminal operation). Unless stated otherwise, a standard-owner operation requires
-exactly one `AGG_SIG_ME` over the owner key (§4); a custom-owner operation requires whatever the
-caller's inner spend requires.
+exactly one `AGG_SIG_ME` over the owner key (§4); a custom-owner operation, where the operation
+accepts one (§2.4), requires whatever the caller's inner spend requires.
 
 | Operation | Unit | Inputs | CoinSpends produced | Recreated child | Signature |
 |---|---|---|---|---|---|
@@ -113,12 +120,19 @@ caller's inner spend requires.
 Notes:
 - **Create** builds the eve DID via `Launcher::create_eve_did`, then performs the settle spend
   itself (via `Did::spend` with an `Owner`-derived inner [`Spend`], SPEC §2.4) rather than the SDK's
-  typed `Launcher::create_did`/`Did::update`, because those require a concrete `SpendWithConditions +
-  ToTreeHash` inner layer and so cannot accept an `Owner::Custom` pre-built spend. Building on the raw
-  `Did::spend` primitive keeps every create/update/settle operation generic over `Owner`. All three
-  resulting spends (funding, launcher, settle) are returned together as one `DidSpend`.
-  `create_eve_did_only` is the lower-level primitive that stops after the launcher spend, for a
-  caller that wants to fold its own follow-up spend into the same bundle.
+  typed `Launcher::create_did`/`Did::update`, which require a concrete `SpendWithConditions +
+  ToTreeHash` inner layer. The settle step is the no-condition case of **Spend-with-conditions**
+  below — one code path, so the recreation condition is emitted identically either way. All three
+  resulting spends (funding, launcher, settle) are returned together as one `DidSpend`. Create
+  requires `Owner::Standard` (§2.4). `create_eve_did_only` is the lower-level primitive that stops
+  after the launcher spend, for a caller that wants to fold its own follow-up spend into the same
+  bundle.
+- **Spend-with-conditions** (`spend_did_with_conditions`) spends the DID emitting the caller's
+  conditions IN ADDITION to the recreation `CREATE_COIN` that preserves the DID unchanged (same
+  inner puzzle hash, same amount, same owner hint). The recreation condition MUST be appended to the
+  caller's conditions and MUST NOT be replaced or omitted. The spend is staged into the caller's
+  `SpendContext`; the caller's `Conditions` MUST have been built in that same context. This is the
+  primitive **Launch-from-DID** and **Announce-as-DID** are expressed in terms of.
 - **Update/Settle/Transfer/Launch/Melt/Attest** all build on the SDK `Did::update*` / `Did::spend` /
   `Did::transfer` methods with the inner spend from the `Owner` (§2.4).
 - dig-did MUST NOT sign or broadcast any of these; it returns the `CoinSpend`s only (INV-3).

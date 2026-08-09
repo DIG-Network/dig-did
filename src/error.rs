@@ -42,6 +42,14 @@ pub enum DidError {
     #[error("invalid did:chia string: {0}")]
     InvalidDidString(String),
 
+    /// The operation cannot honour the [`crate::Owner`] variant it was given, because it must add
+    /// conditions of its own and a caller-supplied pre-built inner spend emits one fixed condition
+    /// set. Rather than silently dropping those conditions — which yields a well-formed bundle that
+    /// creates none of the coins it reports — the operation refuses. The message names the
+    /// alternative the caller should use instead (SPEC §5, fail-closed).
+    #[error("unsupported owner for this operation: {0}")]
+    UnsupportedOwner(&'static str),
+
     /// A recovery operation supplied an inconsistent recovery configuration (list hash / required
     /// verifications mismatch).
     #[error("invalid recovery configuration: {0}")]

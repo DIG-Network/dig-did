@@ -15,11 +15,20 @@ use crate::DidResult;
 ///
 /// - [`Owner::Standard`] curries the standard single-key p2 layer over the owner key and emits the
 ///   supplied `conditions` from it (the usual path — one `AGG_SIG_ME` results).
-/// - [`Owner::Custom`] returns the caller's pre-built inner spend unchanged. A custom p2 puzzle
-///   bakes its own conditions in when the caller constructs it, so `conditions` is intentionally
-///   ignored for this variant — the caller owns the inner spend end to end.
+/// - [`Owner::Custom`] returns the caller's pre-built inner spend unchanged, **dropping
+///   `conditions`** — a pre-built `(puzzle, solution)` pair emits one fixed condition set and cannot
+///   be extended after the fact.
 ///
-/// Consumed by every DID operation module (create, hydrate follow-ups, and beyond).
+/// # The drop is only sound where the caller could have known the conditions
+///
+/// Passing a non-empty `conditions` alongside an [`Owner::Custom`] silently produces a spend that
+/// emits none of them, so every call site MUST either pass `Conditions::new()` for that variant or
+/// refuse it. Conditions computed *inside* the call — launcher create/announcement conditions, a
+/// singleton's recreation condition — are by construction unknowable to the caller, so any call site
+/// that builds them refuses [`Owner::Custom`] with [`crate::DidError::UnsupportedOwner`] rather than
+/// returning a well-formed bundle that creates none of the coins it reports.
+///
+/// Consumed by every DID operation module (create, update, hydrate follow-ups, and beyond).
 pub(crate) fn inner_spend(
     ctx: &mut SpendContext,
     owner: Owner,
