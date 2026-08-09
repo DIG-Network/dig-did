@@ -231,6 +231,92 @@ mod tests {
         Ok(())
     }
 
+    /// Whether `condition` is a `CREATE_COIN` paying `puzzle_hash`.
+    fn creates_coin_with_puzzle_hash(condition: &Condition, puzzle_hash: Bytes32) -> bool {
+        condition
+            .as_create_coin()
+            .is_some_and(|create| create.puzzle_hash == puzzle_hash)
+    }
+
+    /// Whether `condition` is a `CREATE_PUZZLE_ANNOUNCEMENT` carrying exactly `message`.
+    fn announces(condition: &Condition, message: &Bytes) -> bool {
+        condition
+            .as_create_puzzle_announcement()
+            .is_some_and(|announcement| announcement.message == *message)
+    }
+
+    /// The recreation `CREATE_COIN` is emitted FIRST, ahead of every caller condition — pinned
+    /// structurally, on the conditions the spend actually emits.
+    ///
+    /// **Do not delete this as redundant with
+    /// `a_foreign_singleton_launcher_cannot_be_parented_to_the_did_coin`.** That test no longer
+    /// pins the ordering: it was the only fixture supplying the odd-amount, memo-less `CREATE_COIN`
+    /// that `Did::spend`'s successor scan aborts on, and `reject_conditions_a_did_must_never_carry`
+    /// now refuses exactly that input at build time. Every condition that reaches the emit is
+    /// therefore even-amount, and the successor scan finds the recreation wherever it sits — so the
+    /// ordering is no longer observable through this crate's public API by outcome alone. This test
+    /// is the only thing standing between a refactor to `Conditions::new().extend(conditions)
+    /// .create_coin(..)` and a silent break of a property `SPEC.md` states normatively.
+    ///
+    /// It asserts POSITION, not outcome, precisely because outcome cannot distinguish the two
+    /// orderings.
+    ///
+    /// Position is measured relative to the caller's own conditions rather than as an absolute
+    /// index: the puzzle layers contribute a fixed prefix of their own ahead of anything this
+    /// function composes (the singleton top layer's `ASSERT_MY_AMOUNT`/`ASSERT_MY_PARENT_ID`, and
+    /// the p2 puzzle's `AGG_SIG_ME`), so the recreation is never at absolute index 0. What IS
+    /// load-bearing, and what this pins, is that the recreation opens the composed list and the
+    /// caller's conditions follow it IMMEDIATELY and in order — the shape `Did::spend`'s successor
+    /// scan depends on. Two caller conditions, so a reversal is visible as more than an off-by-one.
+    #[test]
+    fn the_recreation_is_emitted_before_the_callers_conditions() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        let recreated_puzzle_hash = singleton_puzzle_hash(&owner.did);
+        let first = Bytes::from(b"dig-did::ordering::first".to_vec());
+        let second = Bytes::from(b"dig-did::ordering::second".to_vec());
+        let _child = spend_did_with_conditions(
+            ctx,
+            owner.did,
+            Owner::Standard(owner.pk),
+            Conditions::new()
+                .create_puzzle_announcement(first.clone())
+                .create_puzzle_announcement(second.clone()),
+        )?;
+
+        let coin_spends = ctx.take();
+        let emitted = all_emitted_conditions(ctx, &coin_spends)?;
+
+        let index_of = |what: &str, predicate: &dyn Fn(&Condition) -> bool| {
+            emitted
+                .iter()
+                .position(predicate)
+                .unwrap_or_else(|| panic!("{what} must reach the wire, got {emitted:?}"))
+        };
+
+        let recreation = index_of("the DID's recreation", &|condition| {
+            creates_coin_with_puzzle_hash(condition, recreated_puzzle_hash)
+        });
+        let first = index_of("the caller's first condition", &|condition| {
+            announces(condition, &first)
+        });
+        let second = index_of("the caller's second condition", &|condition| {
+            announces(condition, &second)
+        });
+
+        assert_eq!(
+            (first, second),
+            (recreation + 1, recreation + 2),
+            "the recreation must open the composed list, with the caller's conditions following it \
+             in order, got {emitted:?}"
+        );
+
+        sim.spend_coins(coin_spends, &[owner.sk])?;
+        Ok(())
+    }
+
     /// Exactly one `AGG_SIG_ME` under the owner's key — the key accounting the consuming crate's
     /// signing gate depends on.
     ///

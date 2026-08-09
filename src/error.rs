@@ -16,7 +16,13 @@ pub type DidResult<T> = Result<T, DidError>;
 /// The variants split into two families: errors *delegated* to the chia-wallet-sdk driver/signer
 /// (wrapped verbatim so the underlying cause is never lost), and DID-domain errors this crate
 /// raises itself (parse/hydration/codec guards, all fail-closed per SPEC §5).
+///
+/// Marked `#[non_exhaustive]`: this taxonomy grows whenever a new fail-closed guard is added, and
+/// every such addition would otherwise be a breaking change for any downstream exhaustive `match`.
+/// Downstream code must carry a `_` arm. `dig-account`'s `AccountError` is `#[non_exhaustive]` for
+/// the same reason; the two now agree.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DidError {
     /// A chia-wallet-sdk driver operation failed (puzzle currying, spend construction, CLVM
     /// evaluation). The wrapped [`DriverError`] carries the precise cause.
