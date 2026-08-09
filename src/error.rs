@@ -79,9 +79,13 @@ pub enum DidError {
     /// and no domain separation** — the signed message is the caller's bytes verbatim. A DID owner
     /// induced to sign one produces a permanent, replayable assertion under their identity key,
     /// reusable in any spend or challenge-response the attacker later constructs. Since this crate's
-    /// contract is that the caller signs every message `required_signatures` reports, and a caller's
-    /// conditions may be shaped by a dApp or a remote request, such a requirement is never legitimate
-    /// in a DID spend and is refused (SPEC §5, fail-closed).
+    /// contract is that the caller signs every message `required_signatures` reports, such a
+    /// requirement is never legitimate in a DID spend and is refused (SPEC §5, fail-closed).
+    ///
+    /// This refusal removes the one shape whose damage OUTLIVES the bundle; it does not make a
+    /// hostile condition set safe. The permitted shapes still move the caller's own bundled funds
+    /// to caller-chosen puzzle hashes and still emit announcements under the DID's authority, so a
+    /// caller composing conditions from an untrusted source MUST review the bundle before signing.
     #[error(
         "caller supplied an AGG_SIG_UNSAFE condition: it is signed with no coin binding and no \
          domain separation, so the resulting signature is replayable against any other spend — a \

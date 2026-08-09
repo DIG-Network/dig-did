@@ -1,9 +1,33 @@
 //! DID owner spends that leave the DID itself unchanged (SPEC §3, unit U3).
 //!
 //! The DID's inner puzzle is spent, the DID recreates itself byte-identically, and any conditions the
-//! caller supplies ride along in that same spend. This is how a caller binds another operation — a
-//! dig-merkle store launch, an NFT assignment, an attestation — to an authenticated act of the DID
-//! it controls, in one atomic bundle.
+//! caller supplies ride along in that same spend. This is how a caller binds another operation to an
+//! authenticated act of the DID it controls, in one atomic bundle.
+//!
+//! # What this composes with, and what it does not
+//!
+//! Composition is by ANNOUNCEMENT: the DID emits an announcement another spend in the same bundle
+//! asserts, or asserts an announcement that other spend emits. Both directions are on the allowlist,
+//! and both are atomic — neither spend confirms without the other. That covers a dig-merkle store
+//! launch, an attestation, and any operation whose own spend can be authorized by "the DID spent in
+//! this bundle said so".
+//!
+//! Composition by MAGIC CONDITION does not work here. The data-store root updater
+//! (`UpdateDataStoreMerkleRoot`, opcode −13) and the NFT owner assignment (`TransferNft`, opcode
+//! −10) are both refused by the allowlist today. A DID-authorized NFT assignment is a real
+//! operation and needs its own deliberate unit — widening a custody allowlist to make a sentence in
+//! a doc comment true is exactly the change this guard exists to prevent.
+//!
+//! # What the allowlist does and does not promise
+//!
+//! It bounds the KIND of authority a spend may create, not the VALUE it may move. A permitted
+//! even-amount `CREATE_COIN` may pay any amount of the caller's bundled funds to any puzzle hash,
+//! and a permitted `CREATE_PUZZLE_ANNOUNCEMENT` is emitted by the DID coin verbatim — which is
+//! precisely how a DID grants authority to another spend. The invariant that IS held: **nothing on
+//! the allowlist creates authority that outlives the bundle.** A caller who does not trust the
+//! source of these conditions must review the bundle; the guard does not make hostile conditions
+//! safe, and no allowlist over a conditions passthrough could. See
+//! [`permit_only_conditions_a_did_may_carry`].
 //!
 //! The DID's own spend requires exactly one `AGG_SIG_ME` under the owner's key. The caller's
 //! conditions may add signature requirements of their own on top of that, but only the kinds bound
@@ -132,22 +156,46 @@ pub fn spend_did_with_conditions(
 ///    variant it silently admits. An allowlist fails closed by construction, and `Other` itself is
 ///    refused — a DID-preserving spend has no legitimate need for a condition the SDK cannot name.
 ///
+/// # The scope of the guarantee
+///
+/// The allowlist bounds the KIND of authority a DID spend may create. It does NOT bound value, and
+/// it does NOT sanitize a hostile caller. Two permitted shapes make that concrete, both demonstrated
+/// on the simulator: an even-amount `CREATE_COIN` moved a caller-chosen amount of the signer's own
+/// bundled funds to a caller-chosen puzzle hash, and a `CREATE_PUZZLE_ANNOUNCEMENT` was emitted by
+/// the DID coin verbatim — announcements are Chia's authority-granting primitive, so that is a real
+/// grant, not merely a constraint.
+///
+/// The invariant that holds: **nothing on the allowlist creates authority that outlives the bundle.**
+/// Every permitted shape is spent, asserted, or discarded within it. That is what the guard buys —
+/// the DID owner's signature never becomes a replayable or off-domain assertion — and it is the
+/// whole of what it buys. A caller composing conditions from an untrusted source MUST review the
+/// bundle before signing.
+///
 /// # What is permitted, and why
 ///
-/// Announcements and assertions (including timelocks and `ASSERT_MY_*`) only constrain when and
-/// alongside what this spend may run; even-amount `CREATE_COIN`s and `RESERVE_FEE` are ordinary
-/// payments; `REMARK` is inert; messages are the announcement mechanism's successor.
+/// Announcements and assertions (including timelocks and `ASSERT_MY_*`) bind this spend to the rest
+/// of its bundle: assertions constrain when and alongside what it may run, and announcements grant
+/// other spends in the same bundle the DID's authority to run. Even-amount `CREATE_COIN`s and
+/// `RESERVE_FEE` move value the caller's own bundle supplies; `REMARK` is inert; messages are the
+/// announcement mechanism's successor.
 ///
-/// Of the `AGG_SIG_*` family only the kinds bound to something UNIQUE to this coin are permitted —
-/// `AGG_SIG_ME` and the `PARENT`-bearing kinds, all of which commit to a coin id or parent id that
-/// never recurs. `AGG_SIG_PUZZLE`, `AGG_SIG_AMOUNT` and `AGG_SIG_PUZZLE_AMOUNT` are refused because
+/// Of the `AGG_SIG_*` family only the kinds bound to THIS spend's coin lineage are permitted —
+/// `AGG_SIG_ME` and the `PARENT`-bearing kinds, which commit to a coin id or parent id. A coin id is
+/// unique; a parent id is NOT unique to a coin (every sibling of one spend shares it), so an
+/// `AGG_SIG_PARENT` signature is reusable across the coins created by a single spend. It is
+/// permitted nonetheless: that set of coins is fixed at the moment the parent is spent, so the
+/// signature still cannot be carried outside this DID's lineage or replayed in a later generation.
+/// `AGG_SIG_PUZZLE`, `AGG_SIG_AMOUNT` and `AGG_SIG_PUZZLE_AMOUNT` are refused because
 /// a self-recreating DID keeps those attributes IDENTICAL for its entire lifetime (same puzzle
 /// hash, amount 1, every generation), so such a signature is replayable in any later spend emitting
 /// the same kind and message. `AGG_SIG_UNSAFE` is refused with its own error, being bound to
 /// nothing at all.
 ///
-/// Refused by omission, and deliberately: `MELT_SINGLETON` (it would burn the DID), the `RUN_CAT_TAIL`
-/// and NFT/data-store magic `CREATE_COIN` forms, `SOFTFORK`, and `Other`.
+/// Refused by the catch-all arm, and deliberately: `MELT_SINGLETON` (it would burn the DID),
+/// `RUN_CAT_TAIL`, the NFT owner assignment (`TransferNft`, opcode −10), the data-store root updater
+/// (`UpdateDataStoreMerkleRoot`, opcode −13), `SOFTFORK`, and `Other`. `MELT_SINGLETON` is pinned by
+/// `refuses_a_melt_singleton_condition` rather than left to omission: its failure mode is a
+/// permanently burned identity, so widening the allowlist to admit it must turn a test red.
 fn permit_only_conditions_a_did_may_carry(
     ctx: &mut SpendContext,
     conditions: &Conditions,

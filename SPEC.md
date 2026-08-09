@@ -113,8 +113,12 @@ name a list of refusals does not recognise; only a guard that refuses everything
 explicitly permit can fail closed, and it stays closed when a future variant is added. A
 DID-preserving spend MUST permit only: `REMARK`, even-amount `CREATE_COIN`, `RESERVE_FEE`, the
 announcement and message conditions, the `ASSERT_*` assertions (including timelocks and `ASSERT_MY_*`),
-and the `AGG_SIG_*` kinds bound to a coin id or parent id (`AGG_SIG_ME`, `AGG_SIG_PARENT`,
-`AGG_SIG_PARENT_AMOUNT`, `AGG_SIG_PARENT_PUZZLE`). Everything else MUST be refused
+and the `AGG_SIG_*` kinds bound to this spend's coin lineage (`AGG_SIG_ME`, `AGG_SIG_PARENT`,
+`AGG_SIG_PARENT_AMOUNT`, `AGG_SIG_PARENT_PUZZLE`). A coin id is unique to one coin; a parent id is
+NOT — every coin created by one spend shares it — so an `AGG_SIG_PARENT` signature is reusable
+across the coins that spend creates, including caller-created ones. Those kinds are permitted
+nonetheless: that set of coins is fixed when the parent is spent, so the signature cannot be carried
+outside this DID's lineage or replayed in a later generation. Everything else MUST be refused
 (`DisallowedCondition`), including `SOFTFORK`, the magic `CREATE_COIN` forms (`MELT_SINGLETON`,
 `RUN_CAT_TAIL`, the NFT/data-store updaters), any condition the SDK cannot name, and
 `AGG_SIG_PUZZLE`/`AGG_SIG_AMOUNT`/`AGG_SIG_PUZZLE_AMOUNT` — a self-recreating DID keeps the puzzle
@@ -122,6 +126,26 @@ hash and amount identical every generation, so a signature bound only to those i
 later spend. `AGG_SIG_UNSAFE` MUST be refused with its own error (`AggSigUnsafeInConditions`): it is
 signed with no coin binding and no domain separation, so the signature it induces under the DID
 owner's key is replayable against any other spend.
+
+A permitted `CREATE_COIN` MUST additionally carry an amount encoded canonically as chia encodes a
+CLVM integer: the empty atom for zero, no leading byte with the sign bit set, a leading zero byte
+only where it prevents the next byte reading as a sign bit, and no more significant bytes than a
+`u64` holds. An amount outside that encoding MUST be refused (`NonCanonicalCreateCoinAmount`). CLVM
+integers are signed while the typed condition surface decodes the amount unsigned, so without this
+rule a negative or redundantly-encoded amount is admitted, reported as a child DID, and then
+rejected at mempool admission — the opaque failure the guard exists to prevent. The rule mirrors
+chia's own encoding requirement exactly and therefore refuses no amount the chain would accept.
+
+**Scope of the guarantee.** The allowlist bounds the KIND of authority a DID spend may create. It
+MUST NOT be described as bounding value or as making a hostile condition set safe. A permitted
+even-amount `CREATE_COIN` moves a caller-chosen amount of the caller's own bundled funds to a
+caller-chosen puzzle hash, and a permitted `CREATE_PUZZLE_ANNOUNCEMENT` is emitted by the DID coin
+verbatim — announcements are Chia's authority-granting primitive, so a permitted announcement is a
+grant of the DID's authority to another spend in the bundle, not merely a constraint on this one.
+The invariant that holds is this: **nothing on the allowlist creates authority that outlives the
+bundle.** The guard prevents the DID owner's signature becoming a replayable or off-domain
+assertion; it does not sanitize a hostile caller, and no allowlist over a conditions passthrough
+can. A caller composing conditions from an untrusted source MUST review the bundle before signing.
 
 | Operation | Unit | Inputs | CoinSpends produced | Recreated child | Signature |
 |---|---|---|---|---|---|
@@ -269,6 +293,7 @@ not parse as a DID.
 | `UnsupportedOwner(&'static str)` | The operation must add conditions of its own and cannot honour `Owner::Custom` (§2.4). The message names the alternative. |
 | `OddAmountCreateCoin` | A caller passed an odd-amount `CREATE_COIN` to `spend_did_with_conditions`; the singleton's one odd-amount output is the DID's recreation, so the spend could never be valid on chain (§3, fail-closed). |
 | `AggSigUnsafeInConditions` | A caller passed an `AGG_SIG_UNSAFE` to `spend_did_with_conditions`. It is signed with no coin binding and no domain separation, so it induces a replayable signature under the DID owner's identity key over caller-chosen bytes (§3, fail-closed). |
+| `NonCanonicalCreateCoinAmount(String)` | A caller passed a `CREATE_COIN` whose amount atom is not chia's canonical integer encoding (negative, a redundant leading zero, or too many significant bytes). The typed condition surface decodes the amount unsigned, so such a spend would otherwise assemble here and be rejected at mempool admission (§3, fail-closed). The string renders the offending atom. |
 | `DisallowedCondition(String)` | A caller passed a condition outside the allowlist of shapes a DID-preserving spend may carry (§3, fail-closed). The string renders the offending condition. |
 | `MissingLineage` | Hydration could not establish the lineage proof (fail-closed, §5). |
 | `MissingHint` | A parsed DID coin was missing the owner hint memo (fail-closed, §5). |
