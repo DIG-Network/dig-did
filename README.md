@@ -123,7 +123,7 @@ owner key unless noted.
 | `create_eve_did_only` | Lower-level: launches the eve DID and stops (no settle spend) — for folding a custom follow-up spend into the same bundle. | 1× `AGG_SIG_ME` (owner) |
 | `update` (metadata) | Update DID metadata, recreating the child. | 1× `AGG_SIG_ME` (owner) |
 | `update` (settle) | Confirm metadata so wallets can sync it. | 1× `AGG_SIG_ME` (owner) |
-| `spend_did_with_conditions` | DID-preserving owner spend — emits the caller's conditions alongside the recreation; requires `Owner::Standard`. | 1× `AGG_SIG_ME` (owner) |
+| `spend_did_with_conditions` | DID-preserving owner spend — emits the caller's conditions alongside the recreation; requires `Owner::Standard`. Refuses an odd-amount `CREATE_COIN` and any `AGG_SIG_UNSAFE` in those conditions. | 1× `AGG_SIG_ME` (owner), **plus any `AGG_SIG_*` the caller's own conditions require** |
 | `recovery` (set) | Set recovery list hash / required verifications. | 1× `AGG_SIG_ME` (owner) |
 | `recovery` (recover) | Rotate owner via recoverer attestations. | per `num_verifications_required` |
 | `transfer` | Transfer the DID to a new owner (p2 puzzle hash). | 1× `AGG_SIG_ME` (current owner) |

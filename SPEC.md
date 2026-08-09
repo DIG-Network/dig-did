@@ -101,7 +101,12 @@ Every operation returns `Result<DidSpend, DidError>` where `DidSpend = { coin_sp
 Vec<CoinSpend>, child: Option<Did> }`. `child` is the DID as it will exist after the spends confirm
 (`None` only for a terminal operation). Unless stated otherwise, a standard-owner operation requires
 exactly one `AGG_SIG_ME` over the owner key (§4); a custom-owner operation, where the operation
-accepts one (§2.4), requires whatever the caller's inner spend requires.
+accepts one (§2.4), requires whatever the caller's inner spend requires. Where an operation emits
+caller-supplied conditions (**Spend-with-conditions**), any `AGG_SIG_*` among those conditions is an
+ADDITIONAL requirement reported by `required_signatures`, so the stated count is the operation's own
+minimum, not a total. `AGG_SIG_UNSAFE` MUST be refused in caller conditions (`AggSigUnsafeInConditions`):
+it is signed with no coin binding and no domain separation, so the signature it induces under the DID
+owner's key is replayable against any other spend.
 
 | Operation | Unit | Inputs | CoinSpends produced | Recreated child | Signature |
 |---|---|---|---|---|---|
@@ -129,14 +134,24 @@ Notes:
   bundle.
 - **Spend-with-conditions** (`spend_did_with_conditions`) spends the DID emitting the caller's
   conditions IN ADDITION to the recreation `CREATE_COIN` that preserves the DID unchanged (same
-  inner puzzle hash, same amount, same owner hint). The recreation condition MUST be appended to the
-  caller's conditions and MUST NOT be replaced or omitted. The spend is staged into the caller's
+  inner puzzle hash, same amount, same owner hint). The recreation condition MUST be emitted FIRST,
+  before the caller's conditions, and MUST NOT be replaced or omitted. The ordering is load-bearing:
+  a successor DID is identified by scanning the emitted conditions for the first odd-amount
+  `CREATE_COIN`, and that scan ABORTS — reporting no successor rather than skipping ahead — at the
+  first odd-amount `CREATE_COIN` carrying no memos. A recreation emitted after such a condition is
+  therefore unreachable, and the spend reports no successor DID even when it is otherwise valid. The
+  spend is staged into the caller's
   `SpendContext`; the caller's `Conditions` MUST have been built in that same context. This is the
   primitive **Launch-from-DID** and **Announce-as-DID** are expressed in terms of.
 - **One odd-amount output.** A singleton's inner puzzle MUST emit exactly one odd-amount
   `CREATE_COIN`, and a DID's recreation occupies it. A singleton launcher is an odd-amount coin, so a
-  foreign singleton MUST NOT be parented to the DID coin — the bundle builds and the chain rejects
-  it. **Launch-from-DID** therefore parents the launcher to an ordinary coin and binds it to the DID
+  foreign singleton MUST NOT be parented to the DID coin. `spend_did_with_conditions` therefore MUST
+  refuse, with `OddAmountCreateCoin`, any caller condition that is an odd-amount `CREATE_COIN`: the
+  recreation already holds the singleton's one odd-amount output, so such a bundle can never be
+  valid. Refusing at build time is required because the alternative failure is opaque — the bundle
+  assembles and reports a child DID, and is rejected only at mempool admission (it never enters a
+  block, so no fee is paid, but the caller learns nothing about why). **Launch-from-DID** therefore
+  parents the launcher to an ordinary coin and binds it to the DID
   by other means: an announcement asserted by the DID's own spend in the same bundle, and/or the
   launched singleton's owner puzzle hash.
 - **Update/Settle/Transfer/Launch/Melt/Attest** all build on the SDK `Did::update*` / `Did::spend` /
@@ -236,6 +251,8 @@ not parse as a DID.
 | `NotDid` | A puzzle parsed but is not a DID singleton. |
 | `InvalidDidString(String)` | A `did:chia:1…` string was malformed / failed bech32m decoding. |
 | `InvalidRecovery(String)` | An inconsistent recovery configuration was supplied. |
+| `UnsupportedOwner(&'static str)` | The operation must add conditions of its own and cannot honour `Owner::Custom` (§2.4). The message names the alternative. |
+| `OddAmountCreateCoin` | A caller passed an odd-amount `CREATE_COIN` to `spend_did_with_conditions`; the singleton's one odd-amount output is the DID's recreation, so the spend could never be valid on chain (§3, fail-closed). |
 | `MissingLineage` | Hydration could not establish the lineage proof (fail-closed, §5). |
 | `MissingHint` | A parsed DID coin was missing the owner hint memo (fail-closed, §5). |
 | `Chain(String)` | A chain-level precondition was violated, or a `ChainSource` read failed (§10) — surfaced verbatim, never degraded to "assume owned". |

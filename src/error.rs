@@ -50,6 +50,39 @@ pub enum DidError {
     #[error("unsupported owner for this operation: {0}")]
     UnsupportedOwner(&'static str),
 
+    /// A caller supplied an odd-amount `CREATE_COIN` to a DID-preserving spend. A singleton's inner
+    /// puzzle may emit exactly ONE odd-amount `CREATE_COIN`, and the DID's own recreation occupies
+    /// it, so a caller's odd-amount `CREATE_COIN` can never be valid here — most often an attempt to
+    /// parent a foreign singleton launcher (an amount-1 coin) to the DID coin.
+    ///
+    /// Refused at build time because the alternative is opaque: the bundle would assemble and report
+    /// a child DID, then be rejected at mempool admission. It never enters a block, so no fee is
+    /// paid — but the caller pays a wasted round-trip and gets no explanation. Parent the launcher to
+    /// an ordinary coin instead and bind it to the DID by an announcement this spend asserts, or by
+    /// the launched singleton's owner puzzle hash (SPEC §5, fail-closed).
+    #[error(
+        "caller supplied an odd-amount CREATE_COIN: a singleton may emit exactly one odd-amount \
+         output and the DID's recreation occupies it, so this spend could never be valid on chain \
+         — parent any singleton launcher to an ordinary coin and bind it to the DID by announcement"
+    )]
+    OddAmountCreateCoin,
+
+    /// A caller supplied an `AGG_SIG_UNSAFE` requirement in the conditions of a DID spend.
+    ///
+    /// Unlike every other `AGG_SIG_*` condition, `AGG_SIG_UNSAFE` is signed with **no coin binding
+    /// and no domain separation** — the signed message is the caller's bytes verbatim. A DID owner
+    /// induced to sign one produces a permanent, replayable assertion under their identity key,
+    /// reusable in any spend or challenge-response the attacker later constructs. Since this crate's
+    /// contract is that the caller signs every message `required_signatures` reports, and a caller's
+    /// conditions may be shaped by a dApp or a remote request, such a requirement is never legitimate
+    /// in a DID spend and is refused (SPEC §5, fail-closed).
+    #[error(
+        "caller supplied an AGG_SIG_UNSAFE condition: it is signed with no coin binding and no \
+         domain separation, so the resulting signature is replayable against any other spend — a \
+         DID spend must never carry one"
+    )]
+    AggSigUnsafeInConditions,
+
     /// A recovery operation supplied an inconsistent recovery configuration (list hash / required
     /// verifications mismatch).
     #[error("invalid recovery configuration: {0}")]

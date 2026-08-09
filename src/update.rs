@@ -5,20 +5,25 @@
 //! dig-merkle store launch, an NFT assignment, an attestation — to an authenticated act of the DID
 //! it controls, in one atomic bundle.
 //!
-//! Each such spend requires exactly one `AGG_SIG_ME` under the owner's key.
+//! The DID's own spend requires exactly one `AGG_SIG_ME` under the owner's key. The caller's
+//! conditions may add signature requirements of their own on top of that; `AGG_SIG_UNSAFE` is
+//! refused, since it is unbound to any coin and its signature is replayable elsewhere.
 //!
 //! # One odd-amount output
 //!
 //! A singleton's inner puzzle may emit exactly ONE odd-amount `CREATE_COIN`, and the DID's own
 //! recreation occupies it. A singleton launcher is an odd-amount coin, so a foreign singleton CANNOT
-//! be parented to the DID coin: such a bundle builds and reports a child, and the chain then rejects
-//! it. A DID-rooted launch parents its launcher to an ordinary coin and binds it to the DID by other
-//! means (an announcement this spend asserts, or the launched singleton's owner puzzle hash). See
+//! be parented to the DID coin. [`spend_did_with_conditions`] therefore refuses a caller's
+//! odd-amount `CREATE_COIN` outright: left to run, the bundle would assemble and report a child DID,
+//! then be dropped at mempool admission — never entering a block, so costing no fee, but telling the
+//! caller nothing about why. A DID-rooted launch parents its launcher to an ordinary coin and binds
+//! it to the DID by other means (an announcement this spend asserts, or the launched singleton's
+//! owner puzzle hash). See
 //! `a_foreign_singleton_launcher_cannot_be_parented_to_the_did_coin` in this module's tests.
 
 use chia_protocol::Bytes32;
 use chia_wallet_sdk::driver::{Did, SingletonInfo, SpendContext};
-use chia_wallet_sdk::types::Conditions;
+use chia_wallet_sdk::types::{Condition, Conditions};
 
 use crate::context::inner_spend;
 use crate::error::{DidError, DidResult};
@@ -42,14 +47,23 @@ use crate::types::Owner;
 ///
 /// # Signature
 ///
-/// Exactly one `AGG_SIG_ME`, over this DID coin's spend, under `owner`'s key (SPEC §3).
+/// The DID's own spend requires exactly one `AGG_SIG_ME`, over this DID coin, under `owner`'s key
+/// (SPEC §3). The caller's `conditions` MAY add further signature requirements of their own — any
+/// `AGG_SIG_*` among them appears in `required_signatures` too — so the total is one PLUS whatever
+/// the caller supplied, not always one. `AGG_SIG_UNSAFE` is the sole exception: it is refused
+/// outright, because it is signed with no coin binding and no domain separation and so yields a
+/// signature replayable against any other spend.
 ///
 /// # Errors
 ///
+/// - [`DidError::AggSigUnsafeInConditions`] if any caller condition is an `AGG_SIG_UNSAFE`.
 /// - [`DidError::UnsupportedOwner`] if `owner` is [`Owner::Custom`]. A pre-built inner spend emits
 ///   one fixed condition set, so it cannot carry the recreation condition this function must add —
 ///   the caller would receive a child DID the bundle never creates. Build the spend yourself and
 ///   call `Did::spend` directly instead.
+/// - [`DidError::OddAmountCreateCoin`] if any caller condition is an odd-amount `CREATE_COIN`. The
+///   singleton's single odd-amount output is already the DID's recreation, so such a spend could
+///   never be valid on chain; it is refused here rather than at mempool admission.
 /// - [`DidError::Parse`] if the spend produces no parseable successor DID.
 /// - [`DidError::Driver`] for any underlying chia-wallet-sdk failure.
 pub fn spend_did_with_conditions(
@@ -66,6 +80,8 @@ pub fn spend_did_with_conditions(
         ));
     }
 
+    reject_conditions_a_did_must_never_carry(&conditions)?;
+
     let unchanged_inner_puzzle_hash: Bytes32 = did.info.inner_puzzle_hash().into();
     let memos = ctx.hint(did.info.p2_puzzle_hash)?;
 
@@ -81,6 +97,29 @@ pub fn spend_did_with_conditions(
     let spend = inner_spend(ctx, owner, with_recreation)?;
     did.spend(ctx, spend)?
         .ok_or_else(|| DidError::Parse("DID spend produced no successor DID".into()))
+}
+
+/// Rejects the two condition shapes a DID-preserving spend can never legitimately carry.
+///
+/// Both are refused at build time rather than left to fail later, because both later failures are
+/// silent or misleading: the odd `CREATE_COIN` is dropped at mempool admission with no explanation,
+/// and the `AGG_SIG_UNSAFE` does not fail at all — it succeeds, which is the problem.
+fn reject_conditions_a_did_must_never_carry(conditions: &Conditions) -> DidResult<()> {
+    for condition in conditions.iter() {
+        match condition {
+            // A singleton permits exactly ONE odd-amount `CREATE_COIN` and the recreation claims it.
+            // `spend_did_with_conditions` never melts, so a caller's odd-amount output is ALWAYS
+            // chain-invalid here — there is no legitimate case this rejects.
+            Condition::CreateCoin(create) if create.amount % 2 == 1 => {
+                return Err(DidError::OddAmountCreateCoin);
+            }
+            // `AGG_SIG_UNSAFE` carries no coin binding and no domain separation, so signing it yields
+            // a replayable assertion under the DID owner's key over attacker-chosen bytes.
+            Condition::AggSigUnsafe(_) => return Err(DidError::AggSigUnsafeInConditions),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -194,6 +233,12 @@ mod tests {
 
     /// Exactly one `AGG_SIG_ME` under the owner's key — the key accounting the consuming crate's
     /// signing gate depends on.
+    ///
+    /// The fixture deliberately carries a NON-empty condition list. An earlier version passed
+    /// `Conditions::new()`, which could not distinguish "the caller's conditions add no signature
+    /// requirement" from "the caller supplied nothing at all" — the assertion held for a reason the
+    /// test never exercised. A benign announcement is the honest control: conditions ARE present,
+    /// and the count is still one.
     #[test]
     fn spend_did_with_conditions_requires_exactly_one_agg_sig_me_under_the_owner(
     ) -> anyhow::Result<()> {
@@ -205,7 +250,7 @@ mod tests {
             ctx,
             owner.did,
             Owner::Standard(owner.pk),
-            Conditions::new(),
+            Conditions::new().create_puzzle_announcement(Bytes::from(b"benign".to_vec())),
         )?;
         let coin_spends = ctx.take();
 
@@ -285,37 +330,52 @@ mod tests {
     ///
     /// This is a chia singleton rule, not a dig-did choice; the test exists so the failure is a
     /// documented boundary rather than a surprise at the point of use.
+    ///
+    /// This test is ALSO the guard that pins the recreation-first ordering — it is the only test
+    /// whose fixture supplies an odd-amount, memo-less `CREATE_COIN`, the exact condition
+    /// `Did::spend`'s successor scan aborts on. Deleting it as "a redundant documentation test"
+    /// silently unpins a load-bearing property of `spend_did_with_conditions`.
     #[test]
     fn a_foreign_singleton_launcher_cannot_be_parented_to_the_did_coin() -> anyhow::Result<()> {
         let mut sim = Simulator::new();
         let ctx = &mut SpendContext::new();
         let owner = mint(&mut sim, ctx)?;
 
-        let funder = sim.bls(1);
-        let funder_spend = inner_spend(ctx, Owner::Standard(funder.pk), Conditions::new())?;
-        ctx.spend(funder.coin, funder_spend)?;
-
         let launcher = Launcher::new(owner.did.coin.coin_id(), 1);
         let (launch_conditions, _eve_coin) = launcher.spend(ctx, owner.puzzle_hash, ())?;
 
-        // The builder itself succeeds and reports a child DID — the recreation is emitted first, so
-        // `Did::spend` finds it despite the memo-less launcher condition that follows.
-        let child = spend_did_with_conditions(
+        // The launcher's amount-1 `CREATE_COIN` is the singleton's second odd-amount output, so the
+        // bundle could never confirm. It is refused here rather than assembled and dropped at
+        // mempool admission, which would report a child DID that no block ever creates.
+        let result =
+            spend_did_with_conditions(ctx, owner.did, Owner::Standard(owner.pk), launch_conditions);
+        assert!(
+            matches!(result, Err(DidError::OddAmountCreateCoin)),
+            "an odd-amount CREATE_COIN must be refused at build time, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// `AGG_SIG_UNSAFE` is signed with no coin binding and no domain separation, so a DID owner
+    /// induced to sign one produces a replayable assertion over attacker-chosen bytes under their
+    /// identity key. The fixture supplies a message that is NOT derived from any coin in this spend,
+    /// which is precisely what makes the resulting signature reusable elsewhere.
+    #[test]
+    fn spend_did_with_conditions_refuses_an_agg_sig_unsafe_condition() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        let result = spend_did_with_conditions(
             ctx,
             owner.did,
             Owner::Standard(owner.pk),
-            launch_conditions,
-        )?;
-        assert_eq!(child.info.launcher_id, owner.did.info.launcher_id);
-
-        // ...but the singleton top layer rejects the second odd-amount output. (Re-running the DID
-        // coin's puzzle to inspect its conditions would raise here for the same reason, so the chain
-        // itself is the only honest observer.)
-        let coin_spends = ctx.take();
+            Conditions::new()
+                .agg_sig_unsafe(owner.pk, Bytes::from(b"ATTACKER-CHOSEN-MESSAGE".to_vec())),
+        );
         assert!(
-            sim.spend_coins(coin_spends, &[owner.sk, funder.sk])
-                .is_err(),
-            "two odd-amount outputs from a singleton must be rejected on chain"
+            matches!(result, Err(DidError::AggSigUnsafeInConditions)),
+            "an AGG_SIG_UNSAFE must be refused at build time, got {result:?}"
         );
         Ok(())
     }
