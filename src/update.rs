@@ -25,6 +25,7 @@
 //! `a_foreign_singleton_launcher_cannot_be_parented_to_the_did_coin` in this module's tests.
 
 use chia_protocol::Bytes32;
+use chia_wallet_sdk::clvmr::{Allocator, NodePtr, SExp};
 use chia_wallet_sdk::driver::{Did, SingletonInfo, SpendContext};
 use chia_wallet_sdk::types::{Condition, Conditions};
 
@@ -153,9 +154,21 @@ fn permit_only_conditions_a_did_may_carry(
 ) -> DidResult<()> {
     let allocated = ctx.alloc(conditions)?;
     let as_the_chain_sees_them: Vec<Condition> = ctx.extract(allocated)?;
+    // The SAME conditions as raw CLVM nodes, judged alongside the typed ones. The typed form has
+    // already discarded information the chain still sees: `CreateCoin::amount` is a `u64` decoded
+    // from the atom UNSIGNED, so a negative or non-canonically-encoded amount arrives here as an
+    // innocuous number. Only the raw atom can answer that question.
+    let as_raw_clvm: Vec<NodePtr> = ctx.extract(allocated)?;
 
-    for condition in &as_the_chain_sees_them {
+    for (condition, raw) in as_the_chain_sees_them.iter().zip(as_raw_clvm) {
         match condition {
+            // Judged BEFORE the odd-amount rule, because an amount the chain will not even decode
+            // is a more fundamental defect than the value it happens to read as.
+            Condition::CreateCoin(_) if !amount_is_canonically_encoded(ctx, raw) => {
+                return Err(DidError::NonCanonicalCreateCoinAmount(describe_amount(
+                    ctx, raw,
+                )));
+            }
             // A singleton permits exactly ONE odd-amount `CREATE_COIN` and the recreation claims it.
             // `spend_did_with_conditions` never melts, so a caller's odd-amount output is ALWAYS
             // chain-invalid here — there is no legitimate case this rejects.
@@ -202,10 +215,115 @@ fn permit_only_conditions_a_did_may_carry(
             // `CREATE_COIN` forms, by `SOFTFORK`, by the replayable `AGG_SIG_*` kinds — and by every
             // variant a future SDK release adds. Widening the allowlist must be a deliberate act
             // with a stated reason, never the default.
-            other => return Err(DidError::DisallowedCondition(format!("{other:?}"))),
+            other => return Err(DidError::DisallowedCondition(describe(ctx, other, raw))),
         }
     }
     Ok(())
+}
+
+/// The `CREATE_COIN` amount element of `condition`, as a raw CLVM node.
+///
+/// Returns `None` if the node is not shaped `(opcode puzzle_hash amount . rest)`. Every condition
+/// that typed as [`Condition::CreateCoin`] has that shape, so a `None` here means the raw and typed
+/// views disagree — which the caller treats as a refusal, never as an absence of the check.
+fn create_coin_amount_node(allocator: &Allocator, condition: NodePtr) -> Option<NodePtr> {
+    let SExp::Pair(_opcode, after_opcode) = allocator.sexp(condition) else {
+        return None;
+    };
+    let SExp::Pair(_puzzle_hash, after_puzzle_hash) = allocator.sexp(after_opcode) else {
+        return None;
+    };
+    let SExp::Pair(amount, _rest) = allocator.sexp(after_puzzle_hash) else {
+        return None;
+    };
+    Some(amount)
+}
+
+/// Whether the `CREATE_COIN` amount of `condition` is encoded exactly as chia requires.
+///
+/// This mirrors chia's `sanitize_uint` (`chia-consensus`, `max_size = 8`) rule for rule: the empty
+/// atom is zero; a leading byte with the sign bit set is a NEGATIVE integer; a leading zero byte is
+/// permitted ONLY where it stops the next byte reading as a sign bit; and the value must fit in
+/// eight significant bytes. Because it is that rule and not a stricter one, it can refuse nothing
+/// the chain would have accepted.
+fn amount_is_canonically_encoded(allocator: &Allocator, condition: NodePtr) -> bool {
+    let Some(amount) = create_coin_amount_node(allocator, condition) else {
+        return false;
+    };
+    let SExp::Atom = allocator.sexp(amount) else {
+        return false;
+    };
+    let atom = allocator.atom(amount);
+    let bytes = atom.as_ref();
+
+    if bytes.is_empty() {
+        return true;
+    }
+    if bytes[0] & 0x80 != 0 {
+        return false; // a negative integer
+    }
+    if bytes == [0_u8] || (bytes.len() > 1 && bytes[0] == 0 && bytes[1] & 0x80 == 0) {
+        return false; // a leading zero that the value does not need
+    }
+    let significant_bytes = if bytes[0] == 0 { 9 } else { 8 };
+    bytes.len() <= significant_bytes
+}
+
+/// The `CREATE_COIN` amount atom of `condition`, rendered for a refusal message.
+fn describe_amount(allocator: &Allocator, condition: NodePtr) -> String {
+    let Some(amount) = create_coin_amount_node(allocator, condition) else {
+        return "the condition has no amount element".to_string();
+    };
+    match allocator.sexp(amount) {
+        SExp::Atom => {
+            let atom = allocator.atom(amount);
+            let hex: String = atom
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("amount atom 0x{hex}")
+        }
+        SExp::Pair(..) => "the amount element is a pair, not an integer".to_string(),
+    }
+}
+
+/// A refused condition, rendered so the caller can identify it.
+///
+/// [`Condition::Other`] — the smuggling case, and the one a caller is most likely to hit by
+/// accident — holds nothing but a `NodePtr`, whose `Debug` is an allocator index that means nothing
+/// outside this process. Its CLVM OPCODE is the identifying fact, so that is what is surfaced.
+fn describe(allocator: &Allocator, condition: &Condition, raw: NodePtr) -> String {
+    let Condition::Other(_) = condition else {
+        return format!("{condition:?}");
+    };
+    match clvm_opcode(allocator, raw) {
+        Some(opcode) => format!("a condition the SDK cannot name, CLVM opcode {opcode}"),
+        None => "a condition the SDK cannot name, with no atom opcode".to_string(),
+    }
+}
+
+/// The CLVM opcode of `condition` — its first element — read as chia reads it: a SIGNED integer, so
+/// the negative magic opcodes render as themselves. `None` if the condition is not a list whose
+/// first element is an atom of at most eight bytes.
+fn clvm_opcode(allocator: &Allocator, condition: NodePtr) -> Option<i64> {
+    let SExp::Pair(opcode, _rest) = allocator.sexp(condition) else {
+        return None;
+    };
+    let SExp::Atom = allocator.sexp(opcode) else {
+        return None;
+    };
+    let atom = allocator.atom(opcode);
+    let bytes = atom.as_ref();
+    if bytes.len() > 8 {
+        return None;
+    }
+    let negative = bytes.first().is_some_and(|first| first & 0x80 != 0);
+    let mut value: i64 = if negative { -1 } else { 0 };
+    for byte in bytes {
+        value = (value << 8) | i64::from(*byte);
+    }
+    Some(value)
 }
 
 #[cfg(test)]
@@ -681,6 +799,186 @@ mod tests {
                  refused, got {result:?}"
             );
         }
+        Ok(())
+    }
+
+    /// A `CREATE_COIN` whose amount is the raw atom `amount_atom`, handed over as
+    /// [`Condition::Other`] so the atom reaches the guard byte-for-byte.
+    ///
+    /// The typed `CreateCoin` cannot express these fixtures at all: its `amount` is a `u64`, which
+    /// is precisely the information loss under test. `Bytes` serializes to a CLVM atom verbatim, so
+    /// this is the only way to state "an amount encoded like THIS".
+    fn create_coin_with_raw_amount(
+        ctx: &mut SpendContext,
+        puzzle_hash: Bytes32,
+        amount_atom: &[u8],
+    ) -> anyhow::Result<Condition> {
+        smuggled(
+            ctx,
+            &(
+                51_u8,
+                (puzzle_hash, (Bytes::from(amount_atom.to_vec()), ())),
+            ),
+        )
+    }
+
+    /// Builds a DID spend carrying one caller `CREATE_COIN` with the given raw amount atom, and
+    /// returns the guard's verdict.
+    fn spend_with_raw_amount(amount_atom: &[u8]) -> anyhow::Result<DidResult<Did>> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+        let condition = create_coin_with_raw_amount(ctx, owner.puzzle_hash, amount_atom)?;
+        Ok(spend_did_with_conditions(
+            ctx,
+            owner.did,
+            Owner::Standard(owner.pk),
+            Conditions::new().with(condition),
+        ))
+    }
+
+    /// `0x80` is −128 in CLVM's SIGNED integers, and the chain answers `CoinAmountNegative`. The
+    /// typed `CreateCoin::amount` is a `u64` decoded UNSIGNED, so the guard read it as 128 — an
+    /// ordinary even amount — and waved it through to an unexplained mempool drop.
+    #[test]
+    fn refuses_a_create_coin_amount_whose_leading_byte_sets_the_sign_bit() -> anyhow::Result<()> {
+        let result = spend_with_raw_amount(&[0x80])?;
+        assert!(
+            matches!(result, Err(DidError::NonCanonicalCreateCoinAmount(_))),
+            "a negative amount must be refused at build time, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// `0x000002` decodes UNSIGNED to 2, but chia refuses a leading zero the value does not need
+    /// (`InvalidCoinAmount`) — a leading zero is canonical only where it stops the next byte reading
+    /// as a sign bit.
+    #[test]
+    fn refuses_a_create_coin_amount_with_a_redundant_leading_zero() -> anyhow::Result<()> {
+        let result = spend_with_raw_amount(&[0x00, 0x00, 0x02])?;
+        assert!(
+            matches!(result, Err(DidError::NonCanonicalCreateCoinAmount(_))),
+            "a non-canonically-encoded amount must be refused at build time, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// Zero is the EMPTY atom in CLVM; the single byte `0x00` is a redundant encoding of it and
+    /// chia refuses it by name (`sanitize_uint` rejects `[0]` explicitly).
+    #[test]
+    fn refuses_a_create_coin_amount_encoded_as_a_single_zero_byte() -> anyhow::Result<()> {
+        let result = spend_with_raw_amount(&[0x00])?;
+        assert!(
+            matches!(result, Err(DidError::NonCanonicalCreateCoinAmount(_))),
+            "a redundant zero encoding must be refused at build time, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// The positive control the three refusals above cannot supply: a guard that refused EVERY
+    /// raw-atom amount would satisfy all of them while breaking ordinary payments. The atom `0x02`
+    /// is the canonical encoding of 2 — an even, chain-valid amount — travelling the SAME
+    /// `Condition::Other` path as the refused fixtures, so the only difference under test is the
+    /// encoding itself.
+    #[test]
+    fn permits_a_canonically_encoded_even_create_coin_amount() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        // The DID holds 1 mojo and must recreate itself with all of it, so a second coin funds the
+        // caller's output (Chia balances additions against removals across the whole bundle).
+        let funder = sim.bls(2);
+        let funder_spend = inner_spend(ctx, Owner::Standard(funder.pk), Conditions::new())?;
+        ctx.spend(funder.coin, funder_spend)?;
+
+        let condition = create_coin_with_raw_amount(ctx, owner.puzzle_hash, &[0x02])?;
+        let _child = spend_did_with_conditions(
+            ctx,
+            owner.did,
+            Owner::Standard(owner.pk),
+            Conditions::new().with(condition),
+        )?;
+
+        let coin_spends = ctx.take();
+        assert!(
+            creates_coin_to(ctx, &coin_spends, owner.puzzle_hash)?,
+            "the caller's canonically-encoded payment must actually be created"
+        );
+        sim.spend_coins(coin_spends, &[owner.sk, funder.sk])?;
+        Ok(())
+    }
+
+    /// `MELT_SINGLETON` — the `CREATE_COIN` form `(51 () -113)` — burns the DID permanently. It was
+    /// documented as "refused by omission", which is not a property anything went red over: a
+    /// future allowlist edit could admit it with every test still green, and the failure mode is a
+    /// destroyed identity. Pinned here to its own resolved variant so the omission is deliberate
+    /// and observable.
+    #[test]
+    fn refuses_a_melt_singleton_condition() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        // `(51 () -113)`: an empty puzzle-hash atom and the melt magic amount, byte for byte.
+        let melt = smuggled(
+            ctx,
+            &(51_u8, (Bytes::default(), (Bytes::from(vec![0x8F_u8]), ()))),
+        )?;
+
+        // The fixture must genuinely resolve to the melt condition, not to some near-miss the
+        // allowlist would have refused for an unrelated reason.
+        let reparsed: Vec<Condition> = {
+            let allocated = ctx.alloc(&Conditions::new().with(melt.clone()))?;
+            ctx.extract(allocated)?
+        };
+        assert!(
+            matches!(reparsed.as_slice(), [Condition::MeltSingleton(_)]),
+            "the fixture must resolve to MELT_SINGLETON, got {reparsed:?}"
+        );
+
+        let result = spend_did_with_conditions(
+            ctx,
+            owner.did,
+            Owner::Standard(owner.pk),
+            Conditions::new().with(melt),
+        );
+        assert!(
+            matches!(result, Err(DidError::DisallowedCondition(_))),
+            "MELT_SINGLETON would burn the DID and must be refused, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// The refusal message must identify the condition. For [`Condition::Other`] — the smuggling
+    /// case, and the whole reason the allowlist exists — the variant holds only a `NodePtr`, whose
+    /// `Debug` is an allocator index meaningless outside this process. The CLVM opcode is the
+    /// identifying fact a caller can act on.
+    #[test]
+    fn names_the_clvm_opcode_of_a_condition_the_sdk_cannot_name() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        let unknown = smuggled(ctx, &(12345_u32, (Bytes::from(b"payload".to_vec()), ())))?;
+        let result = spend_did_with_conditions(
+            ctx,
+            owner.did,
+            Owner::Standard(owner.pk),
+            Conditions::new().with(unknown),
+        );
+
+        let Err(DidError::DisallowedCondition(rendered)) = result else {
+            panic!("an unnameable condition must be refused, got {result:?}");
+        };
+        assert!(
+            rendered.contains("12345"),
+            "the refusal must name the CLVM opcode, got {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("NodePtr"),
+            "an allocator index tells the caller nothing, got {rendered:?}"
+        );
         Ok(())
     }
 

@@ -89,6 +89,26 @@ pub enum DidError {
     )]
     AggSigUnsafeInConditions,
 
+    /// A caller supplied a `CREATE_COIN` whose amount atom is not chia's canonical integer encoding.
+    ///
+    /// CLVM integers are SIGNED and chia additionally requires a canonical encoding, but the typed
+    /// `CreateCoin::amount` this crate's allowlist reads is a `u64` decoded from the atom UNSIGNED.
+    /// The two disagree on exactly the encodings chia refuses: a leading byte with the sign bit set
+    /// (`0x80` reads as 128, chain says `CoinAmountNegative`), a redundant leading zero (`0x000002`
+    /// reads as 2, chain says `InvalidCoinAmount`), and an atom with more bytes than the value needs
+    /// (chain says the amount overflows). Such a spend assembles here, reports a child DID, and is
+    /// then dropped at mempool admission telling the caller nothing — the opaque failure this guard
+    /// exists to prevent.
+    ///
+    /// The rule mirrors chia's `sanitize_uint` exactly, so it can refuse nothing the chain would
+    /// accept (SPEC §5, fail-closed).
+    #[error(
+        "caller supplied a CREATE_COIN whose amount is not canonically encoded: {0} — CLVM \
+         integers are signed and chia requires a canonical encoding, so this amount would be \
+         rejected at mempool admission"
+    )]
+    NonCanonicalCreateCoinAmount(String),
+
     /// A caller supplied a condition that is not on the allowlist of shapes a DID-preserving spend
     /// may carry. The string renders the offending condition.
     ///
