@@ -89,6 +89,22 @@ pub enum DidError {
     )]
     AggSigUnsafeInConditions,
 
+    /// A caller supplied a condition that is not on the allowlist of shapes a DID-preserving spend
+    /// may carry. The string renders the offending condition.
+    ///
+    /// The guard is an allowlist rather than a list of refusals for a structural reason:
+    /// `chia_sdk_types::Condition` is `#[non_exhaustive]` and carries a catch-all `Other` variant
+    /// that serializes to CLVM **verbatim**, so any caller can hand a refused condition over under a
+    /// name a denylist does not recognise while the chain still sees the condition itself. Only a
+    /// guard that refuses everything it does not explicitly permit can fail closed — and it stays
+    /// closed when a future SDK release adds a variant nobody here has considered (SPEC §5).
+    #[error(
+        "caller supplied a condition a DID spend may not carry: {0} — a DID-preserving spend \
+         permits only announcements, assertions, even-amount CREATE_COINs, fees, and coin-bound \
+         signature requirements"
+    )]
+    DisallowedCondition(String),
+
     /// A recovery operation supplied an inconsistent recovery configuration (list hash / required
     /// verifications mismatch).
     #[error("invalid recovery configuration: {0}")]

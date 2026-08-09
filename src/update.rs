@@ -6,8 +6,11 @@
 //! it controls, in one atomic bundle.
 //!
 //! The DID's own spend requires exactly one `AGG_SIG_ME` under the owner's key. The caller's
-//! conditions may add signature requirements of their own on top of that; `AGG_SIG_UNSAFE` is
-//! refused, since it is unbound to any coin and its signature is replayable elsewhere.
+//! conditions may add signature requirements of their own on top of that, but only the kinds bound
+//! to a coin id or parent id: the caller's conditions are judged by an ALLOWLIST over their
+//! re-parsed CLVM form, so `AGG_SIG_UNSAFE` and every other unbound or lifetime-constant signature
+//! kind is refused. See [`permit_only_conditions_a_did_may_carry`] for why only an allowlist can
+//! fail closed here.
 //!
 //! # One odd-amount output
 //!
@@ -48,15 +51,20 @@ use crate::types::Owner;
 /// # Signature
 ///
 /// The DID's own spend requires exactly one `AGG_SIG_ME`, over this DID coin, under `owner`'s key
-/// (SPEC §3). The caller's `conditions` MAY add further signature requirements of their own — any
-/// `AGG_SIG_*` among them appears in `required_signatures` too — so the total is one PLUS whatever
-/// the caller supplied, not always one. `AGG_SIG_UNSAFE` is the sole exception: it is refused
-/// outright, because it is signed with no coin binding and no domain separation and so yields a
-/// signature replayable against any other spend.
+/// (SPEC §3). The caller's `conditions` MAY add further signature requirements of their own — a
+/// permitted `AGG_SIG_*` among them appears in `required_signatures` too — so the total is one PLUS
+/// whatever the caller supplied, not always one. Only the coin-bound kinds are permitted
+/// (`AGG_SIG_ME` and the `PARENT`-bearing kinds); `AGG_SIG_UNSAFE` and the kinds bound only to
+/// attributes a self-recreating DID never varies are refused, because the signatures they induce
+/// are replayable against other spends. See [`permit_only_conditions_a_did_may_carry`].
 ///
 /// # Errors
 ///
 /// - [`DidError::AggSigUnsafeInConditions`] if any caller condition is an `AGG_SIG_UNSAFE`.
+/// - [`DidError::DisallowedCondition`] if any caller condition falls outside the allowlist of
+///   shapes a DID-preserving spend may carry — the guard refuses everything it does not explicitly
+///   permit, judged on the re-parsed conditions, so it fails closed against a condition disguised
+///   as one the SDK cannot name.
 /// - [`DidError::UnsupportedOwner`] if `owner` is [`Owner::Custom`]. A pre-built inner spend emits
 ///   one fixed condition set, so it cannot carry the recreation condition this function must add —
 ///   the caller would receive a child DID the bundle never creates. Build the spend yourself and
@@ -80,7 +88,7 @@ pub fn spend_did_with_conditions(
         ));
     }
 
-    reject_conditions_a_did_must_never_carry(&conditions)?;
+    permit_only_conditions_a_did_may_carry(ctx, &conditions)?;
 
     let unchanged_inner_puzzle_hash: Bytes32 = did.info.inner_puzzle_hash().into();
     let memos = ctx.hint(did.info.p2_puzzle_hash)?;
@@ -99,13 +107,54 @@ pub fn spend_did_with_conditions(
         .ok_or_else(|| DidError::Parse("DID spend produced no successor DID".into()))
 }
 
-/// Rejects the two condition shapes a DID-preserving spend can never legitimately carry.
+/// Permits ONLY the condition shapes a DID-preserving spend legitimately carries, refusing
+/// everything else — including anything the SDK cannot name.
 ///
-/// Both are refused at build time rather than left to fail later, because both later failures are
-/// silent or misleading: the odd `CREATE_COIN` is dropped at mempool admission with no explanation,
-/// and the `AGG_SIG_UNSAFE` does not fail at all — it succeeds, which is the problem.
-fn reject_conditions_a_did_must_never_carry(conditions: &Conditions) -> DidResult<()> {
-    for condition in conditions.iter() {
+/// # Why an allowlist, and why it judges the RE-PARSED conditions
+///
+/// [`Condition`] is `#[non_exhaustive]` and its final variant is a catch-all, [`Condition::Other`],
+/// which holds a raw CLVM node and serializes to the wire **verbatim**. `Other` is a public variant
+/// of a public enum, so ANY caller may build the exact bytes of a forbidden condition and hand them
+/// over under that name. A guard that matches the caller's typing therefore judges what the caller
+/// chose to CALL the condition, not what the chain will EXECUTE — and its compiler-mandated `_` arm
+/// waves the disguise through. This was not theoretical: an `AGG_SIG_UNSAFE` smuggled as `Other`
+/// reached `required_signatures` intact, an arbitrary-message signing oracle under the DID owner's
+/// identity key.
+///
+/// Two properties close that, and both are required:
+///
+/// 1. **Re-parse before judging.** The caller's conditions are allocated to CLVM and read back as
+///    `Vec<Condition>`, so an `Other`-wrapped `AGG_SIG_UNSAFE` resolves into the typed variant it
+///    actually is. The guard then sees what the chain sees.
+/// 2. **Refuse anything not explicitly permitted.** A denylist over a `#[non_exhaustive]` enum with
+///    a verbatim catch-all is structurally unable to fail closed: every SDK release may add a
+///    variant it silently admits. An allowlist fails closed by construction, and `Other` itself is
+///    refused — a DID-preserving spend has no legitimate need for a condition the SDK cannot name.
+///
+/// # What is permitted, and why
+///
+/// Announcements and assertions (including timelocks and `ASSERT_MY_*`) only constrain when and
+/// alongside what this spend may run; even-amount `CREATE_COIN`s and `RESERVE_FEE` are ordinary
+/// payments; `REMARK` is inert; messages are the announcement mechanism's successor.
+///
+/// Of the `AGG_SIG_*` family only the kinds bound to something UNIQUE to this coin are permitted —
+/// `AGG_SIG_ME` and the `PARENT`-bearing kinds, all of which commit to a coin id or parent id that
+/// never recurs. `AGG_SIG_PUZZLE`, `AGG_SIG_AMOUNT` and `AGG_SIG_PUZZLE_AMOUNT` are refused because
+/// a self-recreating DID keeps those attributes IDENTICAL for its entire lifetime (same puzzle
+/// hash, amount 1, every generation), so such a signature is replayable in any later spend emitting
+/// the same kind and message. `AGG_SIG_UNSAFE` is refused with its own error, being bound to
+/// nothing at all.
+///
+/// Refused by omission, and deliberately: `MELT_SINGLETON` (it would burn the DID), the `RUN_CAT_TAIL`
+/// and NFT/data-store magic `CREATE_COIN` forms, `SOFTFORK`, and `Other`.
+fn permit_only_conditions_a_did_may_carry(
+    ctx: &mut SpendContext,
+    conditions: &Conditions,
+) -> DidResult<()> {
+    let allocated = ctx.alloc(conditions)?;
+    let as_the_chain_sees_them: Vec<Condition> = ctx.extract(allocated)?;
+
+    for condition in &as_the_chain_sees_them {
         match condition {
             // A singleton permits exactly ONE odd-amount `CREATE_COIN` and the recreation claims it.
             // `spend_did_with_conditions` never melts, so a caller's odd-amount output is ALWAYS
@@ -114,9 +163,46 @@ fn reject_conditions_a_did_must_never_carry(conditions: &Conditions) -> DidResul
                 return Err(DidError::OddAmountCreateCoin);
             }
             // `AGG_SIG_UNSAFE` carries no coin binding and no domain separation, so signing it yields
-            // a replayable assertion under the DID owner's key over attacker-chosen bytes.
+            // a replayable assertion under the DID owner's key over attacker-chosen bytes. It keeps
+            // its own error because that is the failure a caller most needs named precisely.
             Condition::AggSigUnsafe(_) => return Err(DidError::AggSigUnsafeInConditions),
-            _ => {}
+
+            Condition::Remark(_)
+            | Condition::CreateCoin(_)
+            | Condition::ReserveFee(_)
+            | Condition::CreateCoinAnnouncement(_)
+            | Condition::AssertCoinAnnouncement(_)
+            | Condition::CreatePuzzleAnnouncement(_)
+            | Condition::AssertPuzzleAnnouncement(_)
+            | Condition::AssertConcurrentSpend(_)
+            | Condition::AssertConcurrentPuzzle(_)
+            | Condition::SendMessage(_)
+            | Condition::ReceiveMessage(_)
+            | Condition::AssertMyCoinId(_)
+            | Condition::AssertMyParentId(_)
+            | Condition::AssertMyPuzzleHash(_)
+            | Condition::AssertMyAmount(_)
+            | Condition::AssertMyBirthSeconds(_)
+            | Condition::AssertMyBirthHeight(_)
+            | Condition::AssertEphemeral(_)
+            | Condition::AssertSecondsRelative(_)
+            | Condition::AssertSecondsAbsolute(_)
+            | Condition::AssertHeightRelative(_)
+            | Condition::AssertHeightAbsolute(_)
+            | Condition::AssertBeforeSecondsRelative(_)
+            | Condition::AssertBeforeSecondsAbsolute(_)
+            | Condition::AssertBeforeHeightRelative(_)
+            | Condition::AssertBeforeHeightAbsolute(_)
+            | Condition::AggSigMe(_)
+            | Condition::AggSigParent(_)
+            | Condition::AggSigParentAmount(_)
+            | Condition::AggSigParentPuzzle(_) => {}
+
+            // The arm that makes this fail closed. It is reached by `Other`, by the magic
+            // `CREATE_COIN` forms, by `SOFTFORK`, by the replayable `AGG_SIG_*` kinds — and by every
+            // variant a future SDK release adds. Widening the allowlist must be a deliberate act
+            // with a stated reason, never the default.
+            other => return Err(DidError::DisallowedCondition(format!("{other:?}"))),
         }
     }
     Ok(())
@@ -131,10 +217,13 @@ mod tests {
     use chia_protocol::Bytes;
     use chia_puzzle_types::singleton::SingletonArgs;
     use chia_puzzle_types::Memos;
+    use chia_wallet_sdk::clvm_traits::ToClvm;
+    use chia_wallet_sdk::clvmr::{self, Allocator};
     use chia_wallet_sdk::driver::Launcher;
     use chia_wallet_sdk::prelude::{PublicKey, MAINNET_CONSTANTS};
     use chia_wallet_sdk::signer::{AggSigConstants, RequiredSignature};
     use chia_wallet_sdk::test::Simulator;
+    use chia_wallet_sdk::types::conditions::{AggSig, AggSigKind, CreateCoin};
 
     /// A DID minted and confirmed on the simulator, with the owner key material needed to spend it
     /// again. Every test here starts from a DID that genuinely exists on chain.
@@ -463,6 +552,170 @@ mod tests {
             matches!(result, Err(DidError::AggSigUnsafeInConditions)),
             "an AGG_SIG_UNSAFE must be refused at build time, got {result:?}"
         );
+        Ok(())
+    }
+
+    /// Wraps `value`'s raw CLVM as [`Condition::Other`] — the catch-all variant the SDK's
+    /// `conditions!` macro appends, which serializes to the wire VERBATIM.
+    ///
+    /// This is the attacker's move, reproduced exactly: build the bytes of a condition the guard
+    /// refuses, then hand them over under a name the guard does not recognise. Any check that
+    /// matches on the caller's own typing sees `Other` and waves it through, while the chain sees
+    /// the condition itself.
+    fn smuggled(
+        ctx: &mut SpendContext,
+        value: &impl ToClvm<Allocator>,
+    ) -> anyhow::Result<Condition> {
+        Ok(Condition::Other(ctx.alloc(value)?))
+    }
+
+    /// The executed bypass, pinned permanently: an `AGG_SIG_UNSAFE` handed over as
+    /// [`Condition::Other`] reached the wire under the old denylist and was reported for signing
+    /// with no coin binding and no domain separation — an arbitrary-message signing oracle under the
+    /// DID owner's identity key. The message here is the attacker's own sentence, not a value
+    /// derived from this spend, which is exactly what makes such a signature reusable elsewhere.
+    #[test]
+    fn refuses_an_agg_sig_unsafe_smuggled_as_an_unrecognized_condition() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        let unsafe_sig = AggSig::new(
+            AggSigKind::Unsafe,
+            owner.pk,
+            Bytes::from(b"I, the DID owner, authorize the transfer of everything".to_vec()),
+        );
+        let disguised = smuggled(ctx, &unsafe_sig)?;
+
+        let result = spend_did_with_conditions(
+            ctx,
+            owner.did,
+            Owner::Standard(owner.pk),
+            Conditions::new().with(disguised),
+        );
+        assert!(
+            matches!(result, Err(DidError::AggSigUnsafeInConditions)),
+            "an AGG_SIG_UNSAFE must be refused however the caller types it, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// The same bypass against the odd-`CREATE_COIN` half: judging the caller's typing rather than
+    /// the wire lets the singleton's single odd-amount output be claimed twice.
+    #[test]
+    fn refuses_an_odd_amount_create_coin_smuggled_as_an_unrecognized_condition(
+    ) -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        let odd: CreateCoin<clvmr::NodePtr> = CreateCoin::new(owner.puzzle_hash, 1, Memos::None);
+        let disguised = smuggled(ctx, &odd)?;
+
+        let result = spend_did_with_conditions(
+            ctx,
+            owner.did,
+            Owner::Standard(owner.pk),
+            Conditions::new().with(disguised),
+        );
+        assert!(
+            matches!(result, Err(DidError::OddAmountCreateCoin)),
+            "an odd-amount CREATE_COIN must be refused however the caller types it, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// A condition the SDK genuinely cannot name survives re-parsing as [`Condition::Other`], and
+    /// the allowlist refuses it. This is the arm that makes the guard fail CLOSED: whatever the next
+    /// SDK release, or a bare-CLVM caller, invents, it does not ride into a DID spend unexamined.
+    #[test]
+    fn refuses_a_condition_the_sdk_cannot_name() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        // Opcode 12345 is not a condition the SDK knows, so it re-parses as `Other`, unchanged.
+        let unknown = smuggled(ctx, &(12345_u32, (Bytes::from(b"payload".to_vec()), ())))?;
+
+        let result = spend_did_with_conditions(
+            ctx,
+            owner.did,
+            Owner::Standard(owner.pk),
+            Conditions::new().with(unknown),
+        );
+        assert!(
+            matches!(result, Err(DidError::DisallowedCondition(_))),
+            "a condition outside the allowlist must be refused, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// `AGG_SIG_PUZZLE` binds to the DID's puzzle hash, which a self-recreating DID keeps IDENTICAL
+    /// in every generation — so such a signature is replayable in any later spend of the same DID
+    /// that emits the same kind and message. `AGG_SIG_AMOUNT` (always 1) and `AGG_SIG_PUZZLE_AMOUNT`
+    /// are the same class. The allowlist removes the class rather than waiting for a p2 layer that
+    /// authorizes on one of them.
+    #[test]
+    fn refuses_agg_sig_kinds_bound_only_to_lifetime_constant_attributes() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        for kind in [
+            AggSigKind::Puzzle,
+            AggSigKind::Amount,
+            AggSigKind::PuzzleAmount,
+        ] {
+            let mut replay_ctx = SpendContext::new();
+            let sig = AggSig::new(kind, owner.pk, Bytes::from(b"replayable".to_vec()));
+            let condition = smuggled(&mut replay_ctx, &sig)?;
+            let result = spend_did_with_conditions(
+                &mut replay_ctx,
+                owner.did,
+                Owner::Standard(owner.pk),
+                Conditions::new().with(condition),
+            );
+            assert!(
+                matches!(result, Err(DidError::DisallowedCondition(_))),
+                "{kind:?} binds only to attributes constant across the DID's lifetime and must be \
+                 refused, got {result:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The control the rejection tests cannot supply on their own: an allowlist that refused
+    /// EVERYTHING would satisfy every test above while breaking the function entirely. A realistic
+    /// mix — an announcement, a timelock, a self-assertion, and a coin-bound signature requirement —
+    /// must still build, reach the chain, and add its signature requirement to the DID's own.
+    #[test]
+    fn permits_the_conditions_a_did_spend_legitimately_carries() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        let _child = spend_did_with_conditions(
+            ctx,
+            owner.did,
+            Owner::Standard(owner.pk),
+            Conditions::new()
+                .create_puzzle_announcement(Bytes::from(b"bind-me".to_vec()))
+                .assert_my_amount(owner.did.coin.amount)
+                .assert_height_relative(0)
+                .agg_sig_me(owner.pk, Bytes::from(b"coin-bound".to_vec())),
+        )?;
+
+        let coin_spends = ctx.take();
+        let constants = AggSigConstants::from(&*MAINNET_CONSTANTS);
+        let required = crate::sign::required_signatures(&coin_spends, &constants)
+            .expect("signature calculation must succeed for a well-formed DID spend");
+        assert_eq!(
+            required.len(),
+            2,
+            "the DID's own AGG_SIG_ME plus the caller's coin-bound one"
+        );
+
+        sim.spend_coins(coin_spends, &[owner.sk])?;
         Ok(())
     }
 }

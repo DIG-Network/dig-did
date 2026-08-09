@@ -104,8 +104,23 @@ exactly one `AGG_SIG_ME` over the owner key (§4); a custom-owner operation, whe
 accepts one (§2.4), requires whatever the caller's inner spend requires. Where an operation emits
 caller-supplied conditions (**Spend-with-conditions**), any `AGG_SIG_*` among those conditions is an
 ADDITIONAL requirement reported by `required_signatures`, so the stated count is the operation's own
-minimum, not a total. `AGG_SIG_UNSAFE` MUST be refused in caller conditions (`AggSigUnsafeInConditions`):
-it is signed with no coin binding and no domain separation, so the signature it induces under the DID
+minimum, not a total.
+
+Caller-supplied conditions MUST be judged by an ALLOWLIST, applied to the conditions RE-PARSED from
+their CLVM form rather than to the variants the caller typed. `Condition` is `#[non_exhaustive]` and
+carries a catch-all variant that serializes verbatim, so a caller can present any condition under a
+name a list of refusals does not recognise; only a guard that refuses everything it does not
+explicitly permit can fail closed, and it stays closed when a future variant is added. A
+DID-preserving spend MUST permit only: `REMARK`, even-amount `CREATE_COIN`, `RESERVE_FEE`, the
+announcement and message conditions, the `ASSERT_*` assertions (including timelocks and `ASSERT_MY_*`),
+and the `AGG_SIG_*` kinds bound to a coin id or parent id (`AGG_SIG_ME`, `AGG_SIG_PARENT`,
+`AGG_SIG_PARENT_AMOUNT`, `AGG_SIG_PARENT_PUZZLE`). Everything else MUST be refused
+(`DisallowedCondition`), including `SOFTFORK`, the magic `CREATE_COIN` forms (`MELT_SINGLETON`,
+`RUN_CAT_TAIL`, the NFT/data-store updaters), any condition the SDK cannot name, and
+`AGG_SIG_PUZZLE`/`AGG_SIG_AMOUNT`/`AGG_SIG_PUZZLE_AMOUNT` — a self-recreating DID keeps the puzzle
+hash and amount identical every generation, so a signature bound only to those is replayable in a
+later spend. `AGG_SIG_UNSAFE` MUST be refused with its own error (`AggSigUnsafeInConditions`): it is
+signed with no coin binding and no domain separation, so the signature it induces under the DID
 owner's key is replayable against any other spend.
 
 | Operation | Unit | Inputs | CoinSpends produced | Recreated child | Signature |
@@ -253,6 +268,8 @@ not parse as a DID.
 | `InvalidRecovery(String)` | An inconsistent recovery configuration was supplied. |
 | `UnsupportedOwner(&'static str)` | The operation must add conditions of its own and cannot honour `Owner::Custom` (§2.4). The message names the alternative. |
 | `OddAmountCreateCoin` | A caller passed an odd-amount `CREATE_COIN` to `spend_did_with_conditions`; the singleton's one odd-amount output is the DID's recreation, so the spend could never be valid on chain (§3, fail-closed). |
+| `AggSigUnsafeInConditions` | A caller passed an `AGG_SIG_UNSAFE` to `spend_did_with_conditions`. It is signed with no coin binding and no domain separation, so it induces a replayable signature under the DID owner's identity key over caller-chosen bytes (§3, fail-closed). |
+| `DisallowedCondition(String)` | A caller passed a condition outside the allowlist of shapes a DID-preserving spend may carry (§3, fail-closed). The string renders the offending condition. |
 | `MissingLineage` | Hydration could not establish the lineage proof (fail-closed, §5). |
 | `MissingHint` | A parsed DID coin was missing the owner hint memo (fail-closed, §5). |
 | `Chain(String)` | A chain-level precondition was violated, or a `ChainSource` read failed (§10) — surfaced verbatim, never degraded to "assume owned". |
