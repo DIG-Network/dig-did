@@ -47,6 +47,12 @@ impl DidSpend {
 /// - [`Owner::Custom`] is the escape hatch — the caller supplies an already-built inner [`Spend`]
 ///   (any p2 puzzle: a custom vault, a multisig, a delegated puzzle). dig-did passes it through
 ///   unchanged, so the caller owns its signature requirements.
+///
+/// **Operations that add conditions of their own** (`create_did`, `create_simple_did`,
+/// `create_eve_did_only`, `spend_did_with_conditions`) require [`Owner::Standard`] and return
+/// [`DidError::UnsupportedOwner`] for [`Owner::Custom`]. A pre-built inner spend emits one fixed
+/// condition set and cannot carry the launcher or recreation conditions computed inside those calls.
+/// See SPEC §2.4.
 #[derive(Debug, Clone, Copy)]
 pub enum Owner {
     /// The standard single-key p2 puzzle, owned by the given (synthetic) public key.

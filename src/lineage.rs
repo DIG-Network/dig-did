@@ -147,6 +147,10 @@ pub fn prove_lineage<S: ChainSource>(
 }
 
 #[cfg(test)]
+// Tests build launchers directly, on purpose: a fixture needs an arbitrary parent id, and some
+// fixtures need an amount the production chokepoint would (rightly) refuse. The lint guards
+// PRODUCTION launch sites; see the note on `singleton_launcher` in create.rs.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use std::collections::HashMap;

@@ -86,6 +86,13 @@ yields `DidError::InvalidDidString`.
   vault, multisig, delegated puzzle). dig-did passes it through unchanged; the caller owns its
   signature requirements.
 
+An operation that must add conditions of its own MUST refuse `Owner::Custom` with
+`DidError::UnsupportedOwner`, naming the alternative. A pre-built spend emits one fixed condition
+set, so those conditions would be silently dropped and the operation would return a well-formed
+bundle that creates none of the coins it reports. This binds `create_did`, `create_eve_did_only`
+(both add launcher conditions computed inside the call) and `spend_did_with_conditions` (which adds
+the DID's recreation condition).
+
 ---
 
 ## §3 Operations
@@ -93,8 +100,63 @@ yields `DidError::InvalidDidString`.
 Every operation returns `Result<DidSpend, DidError>` where `DidSpend = { coin_spends:
 Vec<CoinSpend>, child: Option<Did> }`. `child` is the DID as it will exist after the spends confirm
 (`None` only for a terminal operation). Unless stated otherwise, a standard-owner operation requires
-exactly one `AGG_SIG_ME` over the owner key (§4); a custom-owner operation requires whatever the
-caller's inner spend requires.
+exactly one `AGG_SIG_ME` over the owner key (§4); a custom-owner operation, where the operation
+accepts one (§2.4), requires whatever the caller's inner spend requires. Where an operation emits
+caller-supplied conditions (**Spend-with-conditions**), any `AGG_SIG_*` among those conditions is an
+ADDITIONAL requirement reported by `required_signatures`, so the stated count is the operation's own
+minimum, not a total.
+
+Caller-supplied conditions MUST be judged by an ALLOWLIST, applied to the conditions RE-PARSED from
+their CLVM form rather than to the variants the caller typed. `Condition` is `#[non_exhaustive]` and
+carries a catch-all variant that serializes verbatim, so a caller can present any condition under a
+name a list of refusals does not recognise; only a guard that refuses everything it does not
+explicitly permit can fail closed, and it stays closed when a future variant is added. A
+DID-preserving spend MUST permit only: `REMARK`, even-amount `CREATE_COIN`, `RESERVE_FEE`, the
+announcement and message conditions, the `ASSERT_*` assertions (including timelocks and `ASSERT_MY_*`),
+and the `AGG_SIG_*` kinds bound to this spend's coin lineage (`AGG_SIG_ME`, `AGG_SIG_PARENT`,
+`AGG_SIG_PARENT_AMOUNT`, `AGG_SIG_PARENT_PUZZLE`). A coin id is unique to one coin; a parent id is
+NOT — every coin created by one spend shares it — so an `AGG_SIG_PARENT` signature emitted by a DID
+spend is reusable by any SIBLING of that DID coin: the other outputs of the DID's PREVIOUS spend,
+not the coins this spend creates. Those kinds are permitted nonetheless, because that set is
+bounded: the signature cannot reach a later generation of the DID (each generation has a different
+parent id) and cannot become an off-domain assertion. It is NOT confined to coins the caller
+controls — see "Scope of the guarantee" below. Everything else MUST be refused
+(`DisallowedCondition`), including `SOFTFORK`, the magic `CREATE_COIN` forms (`MELT_SINGLETON`,
+`RUN_CAT_TAIL`, the NFT/data-store updaters), any condition the SDK cannot name, and
+`AGG_SIG_PUZZLE`/`AGG_SIG_AMOUNT`/`AGG_SIG_PUZZLE_AMOUNT` — a self-recreating DID keeps the puzzle
+hash and amount identical every generation, so a signature bound only to those is replayable in a
+later spend. `AGG_SIG_UNSAFE` MUST be refused with its own error (`AggSigUnsafeInConditions`): it is
+signed with no coin binding and no domain separation, so the signature it induces under the DID
+owner's key is replayable against any other spend.
+
+A permitted `CREATE_COIN` MUST additionally carry an amount encoded canonically as chia encodes a
+CLVM integer: the empty atom for zero, no leading byte with the sign bit set, a leading zero byte
+only where it prevents the next byte reading as a sign bit, and no more significant bytes than a
+`u64` holds. An amount outside that encoding MUST be refused (`NonCanonicalCreateCoinAmount`). CLVM
+integers are signed while the typed condition surface decodes the amount unsigned, so without this
+rule a negative or redundantly-encoded amount is admitted, reported as a child DID, and then
+rejected at mempool admission — the opaque failure the guard exists to prevent. The rule mirrors
+chia's own encoding requirement exactly and therefore refuses no amount the chain would accept.
+
+**Scope of the guarantee.** The allowlist bounds the KIND of authority a DID spend may create. It
+MUST NOT be described as bounding value or as making a hostile condition set safe. A permitted
+even-amount `CREATE_COIN` moves a caller-chosen amount of the caller's own bundled funds to a
+caller-chosen puzzle hash, and a permitted `CREATE_PUZZLE_ANNOUNCEMENT` is emitted by the DID coin
+verbatim — announcements are Chia's authority-granting primitive, so a permitted announcement is a
+grant of the DID's authority to another spend in the bundle, not merely a constraint on this one.
+Neither is every permitted shape confined to the bundle's lifetime, nor to the spend's own coin set.
+An `AGG_SIG_PARENT` signature is bound to the DID coin's PARENT id, so it stays satisfiable by any
+future spend of any coin sharing that parent — the outputs of the DID's PREVIOUS spend, not anything
+this spend creates (a coin created here carries THIS coin's id as its parent id, a different value).
+That set was fixed before this spend was built and MAY include a coin an earlier caller paid to a
+third party, under a puzzle that third party chose. For the EVE generation the previous spend is the
+LAUNCHER's, whose only output is the eve coin itself, so the sibling set is empty and the exposure is
+nil; it opens from the first ordinary spend onwards. The bound that does hold: such a signature can
+never reach a later generation of the DID, and can never become an off-domain assertion. The guard
+does not sanitize a hostile caller, and no allowlist over a conditions passthrough can. A caller
+composing conditions from an untrusted source MUST review the bundle before signing, and where an
+`AGG_SIG_PARENT` is present MUST also account for what the DID's PREVIOUS spend created — which this
+bundle does not show.
 
 | Operation | Unit | Inputs | CoinSpends produced | Recreated child | Signature |
 |---|---|---|---|---|---|
@@ -104,7 +166,7 @@ caller's inner spend requires.
 | **Set-recovery** | U4 | `Did`, owner, new `recovery_list_hash`, `num_verifications_required` | DID update spend recreating the DID with new recovery config | `Did` with new recovery fields | 1× `AGG_SIG_ME` (owner) |
 | **Recover** | U4 | `Did`, recoverer attestations, new p2 puzzle hash | DID recovery spend rotating owner to the new p2 | `Did` with new `p2_puzzle_hash` | attestations per `num_verifications_required` |
 | **Transfer** | U5 | `Did`, owner, new p2 puzzle hash | DID update spend creating the DID under the new owner (hinted) | `Did` with new `p2_puzzle_hash` | 1× `AGG_SIG_ME` (CURRENT owner) |
-| **Launch-from-DID** (child DID / NFT / datastore) | U6 | `Did`, owner, launch parameters | DID update spend emitting the launch conditions + the dependent singleton's launch spend(s) | `Did` (unchanged) + the launched primitive | 1× `AGG_SIG_ME` (owner) |
+| **Launch-from-DID** (child DID / NFT / datastore) | U6 | `Did`, owner, launch parameters | DID spend emitting the launch's announcement assertion + the dependent singleton's launch spend(s), whose launcher is parented to an ordinary coin (see the one-odd-output note below) | `Did` (unchanged) + the launched primitive | 1× `AGG_SIG_ME` (owner) |
 | **Melt** | U7 | `Did`, owner | DID spend with no odd-amount successor (terminal) | `None` | 1× `AGG_SIG_ME` (owner) |
 | **Announce-as-DID** (attest) | U8 | `Did`, owner, announcement message/target | DID update spend emitting the announcement condition | `Did` (unchanged) | 1× `AGG_SIG_ME` (owner) |
 | **Hydrate** | U9 | parent coin, parent puzzle reveal, parent solution, child coin | — (parse only) | the spendable `Did` | — |
@@ -113,12 +175,54 @@ caller's inner spend requires.
 Notes:
 - **Create** builds the eve DID via `Launcher::create_eve_did`, then performs the settle spend
   itself (via `Did::spend` with an `Owner`-derived inner [`Spend`], SPEC §2.4) rather than the SDK's
-  typed `Launcher::create_did`/`Did::update`, because those require a concrete `SpendWithConditions +
-  ToTreeHash` inner layer and so cannot accept an `Owner::Custom` pre-built spend. Building on the raw
-  `Did::spend` primitive keeps every create/update/settle operation generic over `Owner`. All three
-  resulting spends (funding, launcher, settle) are returned together as one `DidSpend`.
-  `create_eve_did_only` is the lower-level primitive that stops after the launcher spend, for a
-  caller that wants to fold its own follow-up spend into the same bundle.
+  typed `Launcher::create_did`/`Did::update`, which require a concrete `SpendWithConditions +
+  ToTreeHash` inner layer. The settle step is the no-condition case of **Spend-with-conditions**
+  below — one code path, so the recreation condition is emitted identically either way. All three
+  resulting spends (funding, launcher, settle) are returned together as one `DidSpend`. Create
+  requires `Owner::Standard` (§2.4). `create_eve_did_only` is the lower-level primitive that stops
+  after the launcher spend, for a caller that wants to fold its own follow-up spend into the same
+  bundle.
+- **The funding coin becomes the DID, in full.** A launch gives the singleton the funding coin's
+  ENTIRE amount; this crate emits no change output, because deciding where change goes is caller
+  policy, not a spend builder's. Two consequences bind every create entry point (`create_did`,
+  `create_simple_did`, `create_eve_did_only`):
+  - The amount MUST be ODD. A singleton is the odd-amount output of its launcher, so an even-amount
+    funding coin yields a bundle that spends the coin and creates no singleton at all — a total,
+    silent loss rather than a rejected spend. Creation MUST refuse it with `EvenSingletonAmount`.
+    The proof is carried by the `SingletonAmount` newtype, whose only constructor validates and
+    which every launch site MUST go through. EVERY SDK route by which a launcher can take a raw
+    amount — each of its constructors AND any amount mutator on the built launcher — could bypass
+    the newtype, so ALL of them MUST be denied to new call sites by a lint (`disallowed-methods` in
+    `clippy.toml`, with CI running clippy as `-D warnings`), leaving one annotated production
+    exemption at the chokepoint. Denying only the primary constructor is NOT sufficient and MUST NOT
+    be read as conformance; an SDK upgrade that adds a route MUST extend the denial in the same unit
+    of work. The newtype states the rule; the lint is what
+    makes bypassing it fail the build rather than merely break a convention.
+  - Any excess above the intended singleton amount is LOCKED in the identity coin permanently. The
+    caller MUST pass a coin pre-split to exactly the amount the DID should carry; `dig-account`'s
+    exact 1-mojo split is the reference pattern.
+- **Spend-with-conditions** (`spend_did_with_conditions`) spends the DID emitting the caller's
+  conditions IN ADDITION to the recreation `CREATE_COIN` that preserves the DID unchanged (same
+  inner puzzle hash, same amount, same owner hint). The recreation condition MUST be emitted FIRST,
+  before the caller's conditions, and MUST NOT be replaced or omitted. The ordering is load-bearing:
+  a successor DID is identified by scanning the emitted conditions for the first odd-amount
+  `CREATE_COIN`, and that scan ABORTS — reporting no successor rather than skipping ahead — at the
+  first odd-amount `CREATE_COIN` carrying no memos. A recreation emitted after such a condition is
+  therefore unreachable, and the spend reports no successor DID even when it is otherwise valid. The
+  spend is staged into the caller's
+  `SpendContext`; the caller's `Conditions` MUST have been built in that same context. This is the
+  primitive **Launch-from-DID** and **Announce-as-DID** are expressed in terms of.
+- **One odd-amount output.** A singleton's inner puzzle MUST emit exactly one odd-amount
+  `CREATE_COIN`, and a DID's recreation occupies it. A singleton launcher is an odd-amount coin, so a
+  foreign singleton MUST NOT be parented to the DID coin. `spend_did_with_conditions` therefore MUST
+  refuse, with `OddAmountCreateCoin`, any caller condition that is an odd-amount `CREATE_COIN`: the
+  recreation already holds the singleton's one odd-amount output, so such a bundle can never be
+  valid. Refusing at build time is required because the alternative failure is opaque — the bundle
+  assembles and reports a child DID, and is rejected only at mempool admission (it never enters a
+  block, so no fee is paid, but the caller learns nothing about why). **Launch-from-DID** therefore
+  parents the launcher to an ordinary coin and binds it to the DID
+  by other means: an announcement asserted by the DID's own spend in the same bundle, and/or the
+  launched singleton's owner puzzle hash.
 - **Update/Settle/Transfer/Launch/Melt/Attest** all build on the SDK `Did::update*` / `Did::spend` /
   `Did::transfer` methods with the inner spend from the `Owner` (§2.4).
 - dig-did MUST NOT sign or broadcast any of these; it returns the `CoinSpend`s only (INV-3).
@@ -216,6 +320,12 @@ not parse as a DID.
 | `NotDid` | A puzzle parsed but is not a DID singleton. |
 | `InvalidDidString(String)` | A `did:chia:1…` string was malformed / failed bech32m decoding. |
 | `InvalidRecovery(String)` | An inconsistent recovery configuration was supplied. |
+| `UnsupportedOwner(&'static str)` | The operation must add conditions of its own and cannot honour `Owner::Custom` (§2.4). The message names the alternative. |
+| `EvenSingletonAmount(u64)` | A create entry point was given a funding coin with an even amount. The singleton is the odd-amount output of its launcher, so the launch would spend the coin and create no DID — the whole funding coin lost silently (§3, fail-closed). The `u64` is the offending amount. |
+| `OddAmountCreateCoin` | A caller passed an odd-amount `CREATE_COIN` to `spend_did_with_conditions`; the singleton's one odd-amount output is the DID's recreation, so the spend could never be valid on chain (§3, fail-closed). |
+| `AggSigUnsafeInConditions` | A caller passed an `AGG_SIG_UNSAFE` to `spend_did_with_conditions`. It is signed with no coin binding and no domain separation, so it induces a replayable signature under the DID owner's identity key over caller-chosen bytes (§3, fail-closed). |
+| `NonCanonicalCreateCoinAmount(String)` | A caller passed a `CREATE_COIN` whose amount atom is not chia's canonical integer encoding (negative, a redundant leading zero, or too many significant bytes). The typed condition surface decodes the amount unsigned, so such a spend would otherwise assemble here and be rejected at mempool admission (§3, fail-closed). The string renders the offending atom. |
+| `DisallowedCondition(String)` | A caller passed a condition outside the allowlist of shapes a DID-preserving spend may carry (§3, fail-closed). The string renders the offending condition. |
 | `MissingLineage` | Hydration could not establish the lineage proof (fail-closed, §5). |
 | `MissingHint` | A parsed DID coin was missing the owner hint memo (fail-closed, §5). |
 | `Chain(String)` | A chain-level precondition was violated, or a `ChainSource` read failed (§10) — surfaced verbatim, never degraded to "assume owned". |
@@ -239,6 +349,18 @@ Error messages MUST be descriptive and MUST NOT include secret material.
 - **`AGG_SIG_ME` binding.** Owner operations bind their signature to the specific coin being spent
   (§4), preventing signature replay across coins. dig-did never emits an `AGG_SIG_UNSAFE` over
   caller bytes.
+- **Bounded, NOT eliminated, exposure through the conditions passthrough.**
+  `spend_did_with_conditions` emits caller-supplied conditions under the DID's authority, judged by
+  an allowlist (§3). The allowlist bounds the KIND of authority created; it bounds neither the VALUE
+  moved nor the lifetime of what it creates. Two residual exposures are properties of the design,
+  not defects: a permitted even-amount `CREATE_COIN` pays caller-chosen amounts of the caller's own
+  bundled funds to caller-chosen puzzle hashes, and a permitted `AGG_SIG_PARENT` induces a signature
+  bound to the DID coin's PARENT id — satisfiable at any future time by any coin sharing that parent
+  (the outputs of the DID's PREVIOUS spend, which MAY include a coin paid to a third party under a
+  puzzle that party chose), though never by a later generation of the DID and never as an off-domain
+  assertion. A caller composing conditions from an untrusted source MUST review the bundle before
+  signing, and where an `AGG_SIG_PARENT` is present MUST also account for what the DID's previous
+  spend created — which the bundle does not show (§3 "Scope of the guarantee").
 - **Fail-closed hydration.** Ambiguous or under-specified chain data is an error, not a guess (§5),
   so a caller never signs against a mis-reconstructed DID.
 - **Deterministic byte output.** Given identical inputs, dig-did produces identical `CoinSpend`

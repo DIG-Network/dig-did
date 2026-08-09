@@ -1,0 +1,18 @@
+# Every route by which a `Launcher` can acquire a raw `u64` amount is denied here, because an EVEN
+# amount silently produces a spend that consumes the funding coin and creates no singleton at all —
+# a total, silent loss of a real coin (SPEC §3 "Create"). Every launch in this crate MUST go through
+# `create::singleton_launcher`, which proves the amount odd via `SingletonAmount` first.
+#
+# Denying only `Launcher::new` would NOT make that structural: `chia-sdk-driver` 0.34 offers five
+# constructors plus an amount mutator, and each of the others reaches the same even-amount state.
+# The list below is the whole set as of 0.34; an SDK bump that adds a constructor MUST extend it.
+# CI runs `cargo clippy --all-targets -- -D warnings`, so a direct call fails the build unless it is
+# explicitly annotated, which forces the exemption to be argued at the call site.
+disallowed-methods = [
+    { path = "chia_wallet_sdk::driver::Launcher::new", reason = "route launches through create::singleton_launcher, which proves the amount odd via SingletonAmount" },
+    { path = "chia_wallet_sdk::driver::Launcher::with_memos", reason = "takes a raw amount; route launches through create::singleton_launcher" },
+    { path = "chia_wallet_sdk::driver::Launcher::create_early", reason = "takes a raw amount; route launches through create::singleton_launcher" },
+    { path = "chia_wallet_sdk::driver::Launcher::create_early_with_memos", reason = "takes a raw amount; route launches through create::singleton_launcher" },
+    { path = "chia_wallet_sdk::driver::Launcher::from_coin", reason = "takes a coin of any amount; route launches through create::singleton_launcher" },
+    { path = "chia_wallet_sdk::driver::Launcher::with_singleton_amount", reason = "overrides a proven-odd amount with a raw one; route launches through create::singleton_launcher" },
+]

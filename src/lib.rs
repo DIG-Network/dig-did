@@ -38,15 +38,23 @@
 //! chain-reading seam (the ONE canonical `dig-chainsource-interface` trait, re-exported),
 //! [`prove_lineage`] + [`AncestryProof`], and [`walk_did_lineage_to_tip`] — and the **DID→XCH address
 //! resolver** ([`resolve_xch_address`], [`resolve_xch_address_from_did_string`]), which authenticates
-//! a DID's current tip to its genuine launcher before returning the owner's payment [`Address`]. The
-//! remaining DID operations (update, recovery, transfer, launch, melt, attest, resolve-document) land
-//! in their own units against this foundation; their modules are declared below as doc-only stubs so
+//! a DID's current tip to its genuine launcher before returning the owner's payment [`Address`]; and
+//! **update** ([`spend_did_with_conditions`] — the DID-preserving owner spend that emits caller
+//! conditions, binding another operation to an authenticated act of the DID in one bundle).
+//!
+//! The remaining DID operations (recovery, transfer, launch, melt, attest, resolve-document) land in
+//! their own units against this foundation; their modules are declared below as doc-only stubs so
 //! the layout is final.
 
 // Internal helpers — not part of the public surface.
 mod context;
 
+// Test-only bundle-inspection helpers, shared across the operation modules' test suites.
+#[cfg(test)]
+mod test_support;
+
 // Public modules.
+pub mod amount;
 pub mod error;
 pub mod sign;
 pub mod types;
@@ -63,6 +71,8 @@ pub mod launch;
 pub mod melt;
 pub mod recovery;
 pub mod transfer;
+
+// DID-preserving owner spends (U3) — shipped.
 pub mod update;
 
 // Lineage authentication (U3): the chain-reading seam + singleton walk, and the lineage proof.
@@ -70,6 +80,7 @@ pub mod lineage;
 pub mod resolve;
 
 // The curated public surface — consumers depend on these paths, not the module layout.
+pub use amount::SingletonAmount;
 pub use create::{create_did, create_eve_did_only, create_simple_did};
 pub use did_string::{did_string_from_launcher_id, launcher_id_from_did_string, DID_CHIA_PREFIX};
 pub use error::{DidError, DidResult};
@@ -81,6 +92,7 @@ pub use resolve::{
 };
 pub use sign::required_signatures;
 pub use types::{Bytes32, Coin, CoinSpend, Did, DidInfo, DidSpend, LineageProof, Owner, Proof};
+pub use update::spend_did_with_conditions;
 
 // The canonical bech32m address codec — re-exported so a consumer can render / decode a resolved XCH
 // payment address (from [`resolve_xch_address`]) without a direct `chia-sdk-utils` dependency.
