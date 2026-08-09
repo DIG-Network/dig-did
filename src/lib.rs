@@ -40,7 +40,7 @@
 //! resolver** ([`resolve_xch_address`], [`resolve_xch_address_from_did_string`]), which authenticates
 //! a DID's current tip to its genuine launcher before returning the owner's payment [`Address`]; and
 //! **update** ([`spend_did_with_conditions`] — the DID-preserving owner spend that emits caller
-//! conditions, e.g. to root another singleton in the DID it controls).
+//! conditions, binding another operation to an authenticated act of the DID in one bundle).
 //!
 //! The remaining DID operations (recovery, transfer, launch, melt, attest, resolve-document) land in
 //! their own units against this foundation; their modules are declared below as doc-only stubs so

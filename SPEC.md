@@ -111,7 +111,7 @@ accepts one (§2.4), requires whatever the caller's inner spend requires.
 | **Set-recovery** | U4 | `Did`, owner, new `recovery_list_hash`, `num_verifications_required` | DID update spend recreating the DID with new recovery config | `Did` with new recovery fields | 1× `AGG_SIG_ME` (owner) |
 | **Recover** | U4 | `Did`, recoverer attestations, new p2 puzzle hash | DID recovery spend rotating owner to the new p2 | `Did` with new `p2_puzzle_hash` | attestations per `num_verifications_required` |
 | **Transfer** | U5 | `Did`, owner, new p2 puzzle hash | DID update spend creating the DID under the new owner (hinted) | `Did` with new `p2_puzzle_hash` | 1× `AGG_SIG_ME` (CURRENT owner) |
-| **Launch-from-DID** (child DID / NFT / datastore) | U6 | `Did`, owner, launch parameters | DID update spend emitting the launch conditions + the dependent singleton's launch spend(s) | `Did` (unchanged) + the launched primitive | 1× `AGG_SIG_ME` (owner) |
+| **Launch-from-DID** (child DID / NFT / datastore) | U6 | `Did`, owner, launch parameters | DID spend emitting the launch's announcement assertion + the dependent singleton's launch spend(s), whose launcher is parented to an ordinary coin (see the one-odd-output note below) | `Did` (unchanged) + the launched primitive | 1× `AGG_SIG_ME` (owner) |
 | **Melt** | U7 | `Did`, owner | DID spend with no odd-amount successor (terminal) | `None` | 1× `AGG_SIG_ME` (owner) |
 | **Announce-as-DID** (attest) | U8 | `Did`, owner, announcement message/target | DID update spend emitting the announcement condition | `Did` (unchanged) | 1× `AGG_SIG_ME` (owner) |
 | **Hydrate** | U9 | parent coin, parent puzzle reveal, parent solution, child coin | — (parse only) | the spendable `Did` | — |
@@ -133,6 +133,12 @@ Notes:
   caller's conditions and MUST NOT be replaced or omitted. The spend is staged into the caller's
   `SpendContext`; the caller's `Conditions` MUST have been built in that same context. This is the
   primitive **Launch-from-DID** and **Announce-as-DID** are expressed in terms of.
+- **One odd-amount output.** A singleton's inner puzzle MUST emit exactly one odd-amount
+  `CREATE_COIN`, and a DID's recreation occupies it. A singleton launcher is an odd-amount coin, so a
+  foreign singleton MUST NOT be parented to the DID coin — the bundle builds and the chain rejects
+  it. **Launch-from-DID** therefore parents the launcher to an ordinary coin and binds it to the DID
+  by other means: an announcement asserted by the DID's own spend in the same bundle, and/or the
+  launched singleton's owner puzzle hash.
 - **Update/Settle/Transfer/Launch/Melt/Attest** all build on the SDK `Did::update*` / `Did::spend` /
   `Did::transfer` methods with the inner spend from the `Owner` (§2.4).
 - dig-did MUST NOT sign or broadcast any of these; it returns the `CoinSpend`s only (INV-3).
