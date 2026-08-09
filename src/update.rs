@@ -23,9 +23,11 @@
 //! It bounds the KIND of authority a spend may create, not the VALUE it may move. A permitted
 //! even-amount `CREATE_COIN` may pay any amount of the caller's bundled funds to any puzzle hash,
 //! and a permitted `CREATE_PUZZLE_ANNOUNCEMENT` is emitted by the DID coin verbatim — which is
-//! precisely how a DID grants authority to another spend. The invariant that IS held: **nothing on
-//! the allowlist creates authority that outlives the bundle.** A caller who does not trust the
-//! source of these conditions must review the bundle; the guard does not make hostile conditions
+//! precisely how a DID grants authority to another spend. The invariant that IS held: **no
+//! permitted shape creates authority over anything outside this spend's own coin set** — an
+//! `AGG_SIG_PARENT` signature does remain satisfiable later, but only by coins parented to this DID
+//! coin, which are fixed when the spend runs and already the caller's. A caller who does not trust
+//! the source of these conditions must review the bundle; the guard does not make hostile conditions
 //! safe, and no allowlist over a conditions passthrough could. See
 //! [`permit_only_conditions_a_did_may_carry`].
 //!
@@ -165,11 +167,14 @@ pub fn spend_did_with_conditions(
 /// the DID coin verbatim — announcements are Chia's authority-granting primitive, so that is a real
 /// grant, not merely a constraint.
 ///
-/// The invariant that holds: **nothing on the allowlist creates authority that outlives the bundle.**
-/// Every permitted shape is spent, asserted, or discarded within it. That is what the guard buys —
-/// the DID owner's signature never becomes a replayable or off-domain assertion — and it is the
-/// whole of what it buys. A caller composing conditions from an untrusted source MUST review the
-/// bundle before signing.
+/// The invariant that holds: **no permitted shape creates authority over anything outside this
+/// spend's own coin set.** Not everything it permits is confined to the bundle's lifetime — an
+/// `AGG_SIG_PARENT` signature remains satisfiable at any future time by any coin parented to the DID
+/// coin, including one the caller created here — but the coins it can ever apply to are fixed the
+/// moment this spend runs, and the caller already controls them. That is what the guard buys: the
+/// DID owner's signature never reaches a coin outside this spend's lineage, and never becomes an
+/// off-domain assertion. It is the whole of what it buys. A caller composing conditions from an
+/// untrusted source MUST review the bundle before signing.
 ///
 /// # What is permitted, and why
 ///
@@ -947,6 +952,151 @@ mod tests {
             Owner::Standard(owner.pk),
             Conditions::new().with(condition),
         )?;
+
+        let coin_spends = ctx.take();
+        assert!(
+            creates_coin_to(ctx, &coin_spends, owner.puzzle_hash)?,
+            "the caller's canonically-encoded payment must actually be created"
+        );
+        sim.spend_coins(coin_spends, &[owner.sk, funder.sk])?;
+        Ok(())
+    }
+
+    /// The amount guard reads the condition at the RIGHT index of a multi-condition list.
+    ///
+    /// The guard inspects the caller's conditions twice over — once typed as `Vec<Condition>` and
+    /// once as the `Vec<NodePtr>` it reads raw amount atoms from — and pairs them positionally. If
+    /// those two ever fall out of step (a truncation, an off-by-one, a refactor that re-allocates
+    /// one of them), the guard would read a benign neighbour's node while judging the offending
+    /// condition, and pass it. Every other test in this module puts the interesting condition
+    /// FIRST, where such a misalignment is invisible; this one puts it at index 2, behind two
+    /// permitted conditions, where it is not.
+    #[test]
+    fn refuses_a_non_canonical_amount_positioned_behind_other_conditions() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        // `0x80` reads as 128 through the typed `u64` surface and as −128 on chain, so only the
+        // RAW atom distinguishes it — exactly the read that misalignment would corrupt.
+        let smuggled_create_coin = create_coin_with_raw_amount(ctx, owner.puzzle_hash, &[0x80])?;
+        let result = spend_did_with_conditions(
+            ctx,
+            owner.did,
+            Owner::Standard(owner.pk),
+            Conditions::new()
+                .create_puzzle_announcement(Bytes::from(b"index-0".to_vec()))
+                .assert_height_relative(0)
+                .with(smuggled_create_coin),
+        );
+
+        assert!(
+            matches!(result, Err(DidError::NonCanonicalCreateCoinAmount(_))),
+            "the third condition's own amount atom must be the one judged, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// The positive control for the alignment test above: the SAME list shape, the SAME index, and
+    /// a canonically-encoded even amount — permitted, and confirmed on the simulator. Without it, a
+    /// guard that refused everything at a non-zero index would satisfy the refusal test.
+    #[test]
+    fn permits_a_canonical_amount_positioned_behind_other_conditions() -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        // The DID recreates itself with all 1 of its mojos, so a second coin funds the payment.
+        let funder = sim.bls(2);
+        let funder_spend = inner_spend(ctx, Owner::Standard(funder.pk), Conditions::new())?;
+        ctx.spend(funder.coin, funder_spend)?;
+
+        let create_coin = create_coin_with_raw_amount(ctx, owner.puzzle_hash, &[0x02])?;
+        let _child = spend_did_with_conditions(
+            ctx,
+            owner.did,
+            Owner::Standard(owner.pk),
+            Conditions::new()
+                .create_puzzle_announcement(Bytes::from(b"index-0".to_vec()))
+                .assert_height_relative(0)
+                .with(create_coin),
+        )?;
+
+        let coin_spends = ctx.take();
+        assert!(
+            creates_coin_to(ctx, &coin_spends, owner.puzzle_hash)?,
+            "the caller's payment at index 2 must actually be created"
+        );
+        sim.spend_coins(coin_spends, &[owner.sk, funder.sk])?;
+        Ok(())
+    }
+
+    /// Builds a three-condition list whose `CREATE_COIN` sits at INDEX 2, behind two permitted
+    /// conditions, with the given raw amount atom.
+    ///
+    /// The guard walks the same allocated node twice — once typed, once raw — and zips the two
+    /// walks, so a `CREATE_COIN` at index 0 cannot distinguish an aligned zip from an offset one.
+    /// Every other raw-amount fixture puts it first. This one does not.
+    fn three_conditions_with_create_coin_last(
+        ctx: &mut SpendContext,
+        puzzle_hash: Bytes32,
+        amount_atom: &[u8],
+    ) -> anyhow::Result<Conditions> {
+        let create_coin = create_coin_with_raw_amount(ctx, puzzle_hash, amount_atom)?;
+        Ok(Conditions::new()
+            .remark(NodePtr::NIL)
+            .create_coin_announcement(Bytes::from(b"ahead-of-the-create-coin".to_vec()))
+            .with(create_coin))
+    }
+
+    /// The guard must inspect EVERY element, not just the first. Confirmed load-bearing: adding a
+    /// `.take(1)` to the zip turns this test red while all three index-0 refusals stay green.
+    ///
+    /// It does NOT, on its own, detect a pure MISALIGNMENT of the two walks. A `CREATE_COIN` paired
+    /// with a neighbour's node finds no amount element there and is refused anyway — the guard fails
+    /// closed in the refusal direction, so the refusal is preserved for the wrong reason. Alignment
+    /// is pinned by the positive control below, which is the direction a misalignment can be seen
+    /// in: rotating the raw walk by one turns THAT test red, and this one stays green.
+    #[test]
+    fn refuses_a_non_canonical_create_coin_amount_behind_two_permitted_conditions(
+    ) -> anyhow::Result<()> {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        let conditions = three_conditions_with_create_coin_last(ctx, owner.puzzle_hash, &[0x80])?;
+        let result =
+            spend_did_with_conditions(ctx, owner.did, Owner::Standard(owner.pk), conditions);
+        assert!(
+            matches!(result, Err(DidError::NonCanonicalCreateCoinAmount(_))),
+            "a negative amount must be refused wherever it sits in the list, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// The positive control for the test above — and the actual regression guard for the ZIP's
+    /// alignment. A guard that refused this whole SHAPE (any list longer than one, say) would
+    /// satisfy the refusal test while breaking every real multi-condition spend; the only difference
+    /// here is the encoding of the amount at index 2.
+    ///
+    /// Confirmed load-bearing: rotating the raw walk by one element makes the amount check read a
+    /// neighbour's node, which carries no amount element, and this legitimate spend is refused.
+    #[test]
+    fn permits_a_canonical_create_coin_amount_behind_two_permitted_conditions() -> anyhow::Result<()>
+    {
+        let mut sim = Simulator::new();
+        let ctx = &mut SpendContext::new();
+        let owner = mint(&mut sim, ctx)?;
+
+        // The DID holds 1 mojo and must recreate itself with all of it, so a second coin funds the
+        // caller's output (Chia balances additions against removals across the whole bundle).
+        let funder = sim.bls(2);
+        let funder_spend = inner_spend(ctx, Owner::Standard(funder.pk), Conditions::new())?;
+        ctx.spend(funder.coin, funder_spend)?;
+
+        let conditions = three_conditions_with_create_coin_last(ctx, owner.puzzle_hash, &[0x02])?;
+        let _child =
+            spend_did_with_conditions(ctx, owner.did, Owner::Standard(owner.pk), conditions)?;
 
         let coin_spends = ctx.take();
         assert!(

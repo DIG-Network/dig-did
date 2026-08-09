@@ -142,10 +142,14 @@ even-amount `CREATE_COIN` moves a caller-chosen amount of the caller's own bundl
 caller-chosen puzzle hash, and a permitted `CREATE_PUZZLE_ANNOUNCEMENT` is emitted by the DID coin
 verbatim — announcements are Chia's authority-granting primitive, so a permitted announcement is a
 grant of the DID's authority to another spend in the bundle, not merely a constraint on this one.
-The invariant that holds is this: **nothing on the allowlist creates authority that outlives the
-bundle.** The guard prevents the DID owner's signature becoming a replayable or off-domain
-assertion; it does not sanitize a hostile caller, and no allowlist over a conditions passthrough
-can. A caller composing conditions from an untrusted source MUST review the bundle before signing.
+The invariant that holds is this: **no permitted shape creates authority over anything outside the
+spend's own coin set.** Not every permitted shape is confined to the bundle's lifetime — an
+`AGG_SIG_PARENT` signature stays satisfiable at any future time by any coin parented to the DID
+coin, including one the caller created in this spend — but the coins it can ever apply to are fixed
+the moment the spend runs, and the caller already controls them. The guard prevents the DID owner's
+signature reaching a coin outside the spend's lineage or becoming an off-domain assertion; it does
+not sanitize a hostile caller, and no allowlist over a conditions passthrough can. A caller
+composing conditions from an untrusted source MUST review the bundle before signing.
 
 | Operation | Unit | Inputs | CoinSpends produced | Recreated child | Signature |
 |---|---|---|---|---|---|
