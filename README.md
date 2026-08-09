@@ -50,6 +50,8 @@ terminal operation such as a melt).
 
 - `Owner::Standard(PublicKey)` — the standard single-key p2 puzzle; dig-did builds the layer for you.
 - `Owner::Custom(Spend)` — you supply an already-built inner spend for any custom p2 puzzle.
+  **Note:** operations that compute conditions of their own (create, settle, spend-with-conditions)
+  refuse `Custom` with `DidError::UnsupportedOwner`; see SPEC §2.4 and `spend_did_with_conditions`.
 
 ---
 
@@ -70,8 +72,12 @@ println!("minted {}", did_string_from_launcher_id(did.info.launcher_id));
 // spend.coin_spends now holds the funding + launcher + settle spends, unsigned (INV-3).
 ```
 
-`Owner::Custom` works identically — pass a pre-built inner `Spend` for any p2 puzzle instead of a
-`PublicKey`, and `create_did`/`create_simple_did`/`create_eve_did_only` build the same shape around it.
+`Owner::Custom` **cannot** be used with `create_did`, `create_simple_did`, or `create_eve_did_only`.
+Those functions compute launcher conditions internally; a pre-built inner spend emits one fixed
+condition set and cannot carry them. Passing `Owner::Custom` to any of these returns
+`DidError::UnsupportedOwner`. Use `Owner::Standard(public_key)` for all create paths. If you need a
+custom p2 puzzle on an already-launched DID, use `spend_did_with_conditions` (which also refuses
+`Custom` — supply the spend directly) or `Launcher::create_eve_did` from chia-wallet-sdk.
 
 ---
 
@@ -116,7 +122,8 @@ owner key unless noted.
 | `create_simple_did` | `create_did` with the common defaults: no recovery list, 1 required verification, nil metadata. | 2× `AGG_SIG_ME` (owner) |
 | `create_eve_did_only` | Lower-level: launches the eve DID and stops (no settle spend) — for folding a custom follow-up spend into the same bundle. | 1× `AGG_SIG_ME` (owner) |
 | `update` (metadata) | Update DID metadata, recreating the child. | 1× `AGG_SIG_ME` (owner) |
-| `update` (settle) | Confirm metadata so wallets can sync it; also emits conditions without transfer. | 1× `AGG_SIG_ME` (owner) |
+| `update` (settle) | Confirm metadata so wallets can sync it. | 1× `AGG_SIG_ME` (owner) |
+| `spend_did_with_conditions` | DID-preserving owner spend — emits the caller's conditions alongside the recreation; requires `Owner::Standard`. | 1× `AGG_SIG_ME` (owner) |
 | `recovery` (set) | Set recovery list hash / required verifications. | 1× `AGG_SIG_ME` (owner) |
 | `recovery` (recover) | Rotate owner via recoverer attestations. | per `num_verifications_required` |
 | `transfer` | Transfer the DID to a new owner (p2 puzzle hash). | 1× `AGG_SIG_ME` (current owner) |
@@ -146,7 +153,9 @@ lands in its own release against this foundation. The table documents the comple
 
 - `Did`, `DidInfo` — the DID singleton and its info (re-exported from `chia-wallet-sdk`).
 - `DidSpend` — `{ coin_spends, child }`, the unsigned output of every operation.
-- `Owner` — `Standard(PublicKey)` | `Custom(Spend)`.
+- `Owner` — `Standard(PublicKey)` | `Custom(Spend)`. Operations that compute conditions internally
+  (create, settle, spend-with-conditions) require `Standard` and return `DidError::UnsupportedOwner`
+  for `Custom` (SPEC §2.4).
 - `DidError` / `DidResult<T>` — the error taxonomy ([`SPEC.md`](./SPEC.md) §6).
 - `AggSigConstants`, `RequiredSignature` — re-exported so you can call and consume
   `required_signatures` without a direct chia-wallet-sdk dependency.
