@@ -86,6 +86,7 @@ pub use did_string::{did_string_from_launcher_id, launcher_id_from_did_string, D
 pub use error::{DidError, DidResult};
 pub use hydrate::{did_info_from_puzzle, hydrate_did_from_parent_spend, parse_did_coin_spend};
 pub use lineage::{prove_lineage, AncestryProof, LineageModel};
+pub use melt::melt;
 pub use resolve::{
     resolve_xch_address, resolve_xch_address_from_did_string, walk_did_lineage_to_tip, ChainSource,
     DidTip, SingletonLineage, MAX_LINEAGE_DEPTH,

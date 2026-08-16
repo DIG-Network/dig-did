@@ -44,6 +44,18 @@ pub enum DidError {
     #[error("coin is not a DID singleton")]
     NotDid,
 
+    /// The caller could not prove it controls the DID: the supplied [`crate::Owner`] key does not
+    /// curry to the DID's current `p2_puzzle_hash`.
+    ///
+    /// Raised by irreversible operations — [`crate::melt`] — before any spend is built. Such a
+    /// spend could never confirm (the caller cannot produce its `AGG_SIG_ME`), but a melt is
+    /// unrecoverable, so authority is refused up front rather than discovered at signing time
+    /// (SPEC §5, fail-closed).
+    #[error(
+        "the supplied owner key does not control this DID: it does not match the DID's current          inner puzzle hash"
+    )]
+    NotTheOwner,
+
     /// A `did:chia:1…` string was malformed or failed bech32m decoding.
     #[error("invalid did:chia string: {0}")]
     InvalidDidString(String),
