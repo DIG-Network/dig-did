@@ -223,6 +223,21 @@ Notes:
   parents the launcher to an ordinary coin and binds it to the DID
   by other means: an announcement asserted by the DID's own spend in the same bundle, and/or the
   launched singleton's owner puzzle hash.
+- **Melt** (`melt`) is TERMINAL and irreversible. It spends the DID with a single `MELT_SINGLETON`
+  magic condition (`(51 () -113)`) instead of a recreation condition, so the singleton top layer
+  creates no successor and the lineage ENDS; the returned `DidSpend.child` MUST be `None`, and an
+  implementation that yields a successor MUST refuse rather than report the spend as a melt. A
+  melted launcher id can never be recreated, so every `did:chia:` reference to it becomes
+  permanently unresolvable.
+  - **Authority MUST be checked before the spend is built.** `melt` MUST refuse, with `NotTheOwner`,
+    an `Owner::Standard` key that does not curry to the DID's current `p2_puzzle_hash`, and MUST
+    refuse `Owner::Custom` with `UnsupportedOwner` (the melt condition is built inside the call, so a
+    pre-built inner spend would emit none of it). Because the operation is unrecoverable, neither
+    refusal may be deferred to signing or to mempool admission.
+  - **The melted amount is an implicit fee, not a payout.** The singleton layer permits exactly one
+    odd-amount `CREATE_COIN` and the melt magic condition occupies it, so the amount MUST NOT be
+    recovered to a caller-supplied puzzle hash in this spend; the output-under-input difference is a
+    fee. The executed spend emits no `CREATE_COIN` at all.
 - **Update/Settle/Transfer/Launch/Melt/Attest** all build on the SDK `Did::update*` / `Did::spend` /
   `Did::transfer` methods with the inner spend from the `Owner` (§2.4).
 - dig-did MUST NOT sign or broadcast any of these; it returns the `CoinSpend`s only (INV-3).
@@ -318,6 +333,7 @@ not parse as a DID.
 | `Signer(String)` | The signing calculator failed (invalid puzzle/solution, infinity public key). Underlying signer error as a string, so the signer's error type does not leak. |
 | `Parse(String)` | A coin/puzzle/solution could not be parsed as the expected shape. |
 | `NotDid` | A puzzle parsed but is not a DID singleton. |
+| `NotTheOwner` | An irreversible operation (`melt`) was given an `Owner` key that does not curry to the DID's current `p2_puzzle_hash`, so the caller cannot prove it controls the singleton. Refused before any spend is built (§3, fail-closed). |
 | `InvalidDidString(String)` | A `did:chia:1…` string was malformed / failed bech32m decoding. |
 | `InvalidRecovery(String)` | An inconsistent recovery configuration was supplied. |
 | `UnsupportedOwner(&'static str)` | The operation must add conditions of its own and cannot honour `Owner::Custom` (§2.4). The message names the alternative. |

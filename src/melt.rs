@@ -20,7 +20,7 @@
 //! implicit fee to the farmer. For the conventional 1-mojo DID that is one mojo.
 
 use chia_puzzle_types::standard::StandardArgs;
-use chia_wallet_sdk::driver::{Did, SingletonInfo, SpendContext};
+use chia_wallet_sdk::driver::{Did, SpendContext};
 use chia_wallet_sdk::types::Conditions;
 
 use crate::context::{drain_coin_spends, inner_spend};
@@ -103,6 +103,7 @@ mod tests {
     use super::*;
     use chia_protocol::Coin;
     use chia_puzzle_types::singleton::SingletonArgs;
+    use chia_wallet_sdk::driver::SingletonInfo;
     use chia_wallet_sdk::prelude::MAINNET_CONSTANTS;
     use chia_wallet_sdk::signer::{AggSigConstants, RequiredSignature};
     use chia_wallet_sdk::test::Simulator;
@@ -126,10 +127,8 @@ mod tests {
     /// The coin the DID's NEXT generation would occupy if this spend recreated the singleton: the
     /// melted coin's id as parent, wearing the DID's own (unchanged) singleton-wrapped puzzle hash.
     fn would_be_successor(did: &Did) -> Coin {
-        let wrapped = SingletonArgs::curry_tree_hash(
-            did.info.launcher_id(),
-            did.info.inner_puzzle_hash(),
-        );
+        let wrapped =
+            SingletonArgs::curry_tree_hash(did.info.launcher_id(), did.info.inner_puzzle_hash());
         Coin::new(did.coin.coin_id(), wrapped.into(), did.coin.amount)
     }
 
@@ -158,7 +157,7 @@ mod tests {
         );
 
         let ctx = &mut SpendContext::new();
-        let built = melt(ctx, did.clone(), Owner::Standard(owner.pk))?;
+        let built = melt(ctx, did, Owner::Standard(owner.pk))?;
         assert!(built.child.is_none(), "a melt reports no successor DID");
         sim.spend_coins(built.coin_spends, std::slice::from_ref(&owner.sk))?;
 
@@ -187,7 +186,12 @@ mod tests {
         let successor = would_be_successor(&did);
 
         let ctx = &mut SpendContext::new();
-        crate::spend_did_with_conditions(ctx, did, Owner::Standard(owner.pk), Conditions::new())?;
+        let _recreated = crate::spend_did_with_conditions(
+            ctx,
+            did,
+            Owner::Standard(owner.pk),
+            Conditions::new(),
+        )?;
         let coin_spends = ctx.take();
         sim.spend_coins(coin_spends, std::slice::from_ref(&owner.sk))?;
 
