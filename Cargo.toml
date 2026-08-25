@@ -32,7 +32,7 @@ crate-type = ["cdylib", "rlib"]
 # (INV-4). Pinned to the 0.34 family the whole DIG on-chain line rides (chia-protocol 0.36). We
 # consume the DID primitive, the launcher, the standard p2 layer, the spend context, and the pure
 # signing calculator through it so the chia-* tree resolves to ONE coherent version set.
-chia-wallet-sdk = "0.34"
+chia-wallet-sdk = "0.36"
 # Direct type deps, pinned to EXACTLY the versions chia-wallet-sdk 0.34 resolves to (a mismatch is a
 # hard cargo error). chia-protocol/chia-puzzle-types carry wire types the umbrella prelude does not
 # re-export (`Proof`, `LineageProof`); clvm-traits carries the CLVM (de)serialization traits.
@@ -48,7 +48,7 @@ clvm-utils = "0.36.1"
 chia-puzzles = "0.20"
 # The canonical `did:chia:` bech32m codec (`Address`) — the same one dig-identity and chip35 use, so
 # a DID string byte-agrees ecosystem-wide (SPEC §2.3/§9). The umbrella crate does not re-export it.
-chia-sdk-utils = "0.34"
+chia-sdk-utils = "0.36"
 # The crate error taxonomy (SPEC §6). thiserror 2 matches the sibling DIG crates.
 thiserror = "2"
 # The ONE canonical `ChainSource` provider interface (the trait + `SingletonLineage` + `CoinRecord`),
@@ -62,7 +62,7 @@ dig-chainsource-interface = "0.3"
 # unlaunched/melted resolve paths without a live network.
 dig-chainsource-interface = { version = "0.3", features = ["testing"] }
 # The in-process Chia Simulator + BLS keypair helpers for building real coin spends in tests.
-chia-sdk-test = "0.34"
+chia-sdk-test = "0.36"
 # Hex assertions on computed signature messages / coin ids in tests.
 hex = "0.4"
 # Ergonomic `Result<_, anyhow::Error>` test bodies (the SDK's own test suite uses the same idiom).
